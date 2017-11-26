@@ -336,8 +336,11 @@ func (rf *Raft) electionLoop() {
 					go func(i int) {
 						DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
 						reply := RequestVoteReply{index: i}
-						for ok := rf.sendRequestVote(i, args, &reply); !ok; {
-							//DPrintf("%d sent RequestVote RPC; it failed at %d for term %d. Retry...", rf.me, i, term)
+						for ok := false; !ok; {
+							ok = rf.sendRequestVote(i, args, &reply)
+							if !ok {
+								DPrintf("%d sent RequestVote RPC; it failed at %d for term %d. Retry...", rf.me, i, term)
+							}
 						}
 						replyCh <- reply
 					}(i)
@@ -420,8 +423,11 @@ func (rf *Raft) maintainAuthorityLoop() {
 					go func(i int) {
 						reply := AppendEntriesReply{}
 						DTPrintf("%d sends heartbeat to %d for term %d\n", rf.me, i, term)
-						for ok := rf.peers[i].Call("Raft.AppendEntries", args, &reply); !ok; {
-							//DTPrintf("%d retry to send heartbeat to %d for term %d\n", rf.me, i, term)
+						for ok := false; !ok; {
+							ok = rf.peers[i].Call("Raft.AppendEntries", args, &reply)
+							if !ok {
+								DTPrintf("%d send heartbeat to %d for term %d failed. Retry...\n", rf.me, i, term)
+							}
 						}
 						DTPrintf("%d got heartbeat reply %v from %d for term %d\n", rf.me, reply, i, term)
 						replyCh <- reply
