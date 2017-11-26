@@ -67,7 +67,6 @@ type RaftState struct {
 type loopProcess struct {
 	start chan bool
 	end   chan bool
-	reset chan bool
 }
 
 const (
@@ -298,14 +297,8 @@ type voteResult struct {
 
 func (rf *Raft) electionLoop() {
 	var voteResultDone chan RaftState
-	wait := true
+	var startElecCh <-chan time.Time
 	for {
-		var startElecCh <-chan time.Time
-		if !wait && voteResultDone == nil {
-			t := getRandomDuration()
-			DTPrintf("%d got new timer %v", rf.me, t)
-			startElecCh = time.After(t)
-		}
 		select {
 		case <-startElecCh:
 			DTPrintf("Triggered, node: %d\n", rf.me)
@@ -314,12 +307,15 @@ func (rf *Raft) electionLoop() {
 				log.Fatal("Wrong rf role ", rf.state.role)
 			}
 			rf.state.role = CANDIDATE
+			DTPrintf("%d becomes candidate\n", rf.me)
 			rf.state.term++
 			term := rf.state.term
 			rf.state.votedFor = rf.me
-			rf.mu.Unlock()
 
-			DTPrintf("%d becomes candidate\n", rf.me)
+			t := getRandomDuration()
+			DTPrintf("%d got new timer %v", rf.me, t)
+			startElecCh = time.After(t)
+			rf.mu.Unlock()
 
 			args := new(RequestVoteArgs)
 			args.Term = term
@@ -340,9 +336,8 @@ func (rf *Raft) electionLoop() {
 					go func(i int) {
 						DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
 						reply := RequestVoteReply{index: i}
-						ok := rf.sendRequestVote(i, args, &reply)
-						if !ok {
-							DPrintf("%d sent RequestVote RPC; it failed at %d for term %d", rf.me, i, term)
+						for ok := rf.sendRequestVote(i, args, &reply); !ok; {
+							DPrintf("%d sent RequestVote RPC; it failed at %d for term %d. Retry...", rf.me, i, term)
 						}
 						replyCh <- reply
 					}(i)
@@ -379,22 +374,19 @@ func (rf *Raft) electionLoop() {
 			rf.state.term = r.term
 			rf.mu.Unlock()
 			if r.role == LEADER {
-				wait = true
 				DTPrintf("%d become a leader for term %d!\n", rf.me, r.term)
+				startElecCh = nil
 				rf.maintainProces.start <- true
 			} else {
-				wait = false
 				DTPrintf("%d is not a leader for term %d\n", rf.me, r.term)
 			}
-		case <-rf.electionProcess.reset:
-			if voteResultDone != nil {
-				log.Fatal("Follower shouldn't wait for vote result")
-			}
 		case <-rf.electionProcess.start:
-			wait = false
+			t := getRandomDuration()
+			DTPrintf("%d got new timer %v", rf.me, t)
+			startElecCh = time.After(t)
 		case <-rf.electionProcess.end:
-			wait = true
 			voteResultDone = nil
+			startElecCh = nil
 		}
 	}
 }
@@ -494,7 +486,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
 	rf.electionProcess = &loopProcess{
-		start: make(chan bool), end: make(chan bool), reset: make(chan bool)}
+		start: make(chan bool), end: make(chan bool)}
 	rf.maintainProces = &loopProcess{
 		start: make(chan bool), end: make(chan bool)}
 
