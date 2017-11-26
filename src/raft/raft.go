@@ -184,7 +184,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	DTPrintf("%d heartbeat\n", rf.me)
+	DTPrintf("%d got heartbeat for term %d, its term is %d\n", rf.me, args.Term, rf.state.term)
 	defer rf.mu.Unlock()
 
 	r := rf.state.role
@@ -220,7 +220,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionProcess.start <- true
 	}
 
-	DTPrintf("%d reset done\n", rf.me)
+	DTPrintf("%d reset done for term %d\n", rf.me, args.Term)
 }
 
 //
@@ -301,21 +301,21 @@ func (rf *Raft) electionLoop() {
 	for {
 		select {
 		case <-startElecCh:
-			DTPrintf("Triggered, node: %d\n", rf.me)
+			DTPrintf("<<<< Triggered, node: %d >>>>\n", rf.me)
 			rf.mu.Lock()
 			if rf.state.role == LEADER {
 				log.Fatal("Wrong rf role ", rf.state.role)
 			}
 			rf.state.role = CANDIDATE
-			DTPrintf("%d becomes candidate\n", rf.me)
 			rf.state.term++
 			term := rf.state.term
+			DTPrintf("%d becomes candidate for term %d\n", rf.me, term)
 			rf.state.votedFor = rf.me
+			rf.mu.Unlock()
 
 			t := getRandomDuration()
 			DTPrintf("%d got new timer %v", rf.me, t)
 			startElecCh = time.After(t)
-			rf.mu.Unlock()
 
 			args := new(RequestVoteArgs)
 			args.Term = term
@@ -337,14 +337,15 @@ func (rf *Raft) electionLoop() {
 						DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
 						reply := RequestVoteReply{index: i}
 						for ok := rf.sendRequestVote(i, args, &reply); !ok; {
-							DPrintf("%d sent RequestVote RPC; it failed at %d for term %d. Retry...", rf.me, i, term)
+							//DPrintf("%d sent RequestVote RPC; it failed at %d for term %d. Retry...", rf.me, i, term)
 						}
 						replyCh <- reply
 					}(i)
 				}
 
 				yays, neys := 0, 0
-				for reply := range replyCh {
+				for i := 0; i < len(rf.peers)-1; i++ {
+					reply := <-replyCh
 					DTPrintf("%d got requestVote with reply %v from %d for term %d\n", rf.me, reply, reply.index, term)
 					switch {
 					case reply.Term > term:
@@ -365,6 +366,7 @@ func (rf *Raft) electionLoop() {
 						return
 					}
 				}
+				vDone <- RaftState{role: FOLLOWER, term: term}
 			}(voteResultDone)
 
 		case r := <-voteResultDone:
@@ -374,17 +376,19 @@ func (rf *Raft) electionLoop() {
 			rf.state.term = r.term
 			rf.mu.Unlock()
 			if r.role == LEADER {
-				DTPrintf("%d become a leader for term %d!\n", rf.me, r.term)
+				DTPrintf("<<>>!!!!%d become a leader for term %d!!!!<<>>\n", rf.me, r.term)
 				startElecCh = nil
 				rf.maintainProces.start <- true
 			} else {
 				DTPrintf("%d is not a leader for term %d\n", rf.me, r.term)
 			}
 		case <-rf.electionProcess.start:
+			DTPrintf("%d electionProcess start for term %d\n", rf.me, rf.state.term)
 			t := getRandomDuration()
 			DTPrintf("%d got new timer %v", rf.me, t)
 			startElecCh = time.After(t)
 		case <-rf.electionProcess.end:
+			DTPrintf("%d electionProcess end for term %d\n", rf.me, rf.state.term)
 			voteResultDone = nil
 			startElecCh = nil
 		}
@@ -393,46 +397,43 @@ func (rf *Raft) electionLoop() {
 
 func (rf *Raft) maintainAuthorityLoop() {
 	var heartbeatDone chan RaftState
-	wait := true
+	var nextCh <-chan time.Time
 	for {
-		var start <-chan time.Time
-		if !wait && heartbeatDone == nil {
-			start = time.After(rf.heartbeatInterval)
-		}
 		select {
-		case <-start:
+		case <-nextCh:
 			rf.mu.Lock()
 			args := new(AppendEntriesArgs)
 			args.Term = rf.state.term
 			rf.mu.Unlock()
 
+			nextCh = time.After(rf.heartbeatInterval)
+
 			heartbeatDone = make(chan RaftState)
 			go func(hDone chan RaftState) {
 				term := args.Term
-				var wg sync.WaitGroup
-				replies := make([]AppendEntriesReply, len(rf.peers))
+				//replies := make([]AppendEntriesReply, len(rf.peers))
+				replyCh := make(chan AppendEntriesReply)
 				for i, _ := range rf.peers {
 					if i == rf.me {
 						continue
 					}
-					wg.Add(1)
 					go func(i int) {
-						defer wg.Done()
-						DTPrintf("%d send heartbeat to %d for term %d\n", rf.me, i, term)
-						rf.peers[i].Call("Raft.AppendEntries", args, &replies[i])
-						DTPrintf("%d got heartbeat %v from %d for term %d\n", rf.me, replies[i], i, term)
+						reply := AppendEntriesReply{}
+						DTPrintf("%d sends heartbeat to %d for term %d\n", rf.me, i, term)
+						for ok := rf.peers[i].Call("Raft.AppendEntries", args, &reply); !ok; {
+							//DTPrintf("%d retry to send heartbeat to %d for term %d\n", rf.me, i, term)
+						}
+						DTPrintf("%d got heartbeat reply %v from %d for term %d\n", rf.me, reply, i, term)
+						replyCh <- reply
 					}(i)
 				}
-				wg.Wait()
 
-				for i, _ := range replies {
-					if i == rf.me {
-						continue
+				for i := 0; i < len(rf.peers)-1; i++ {
+					reply := <-replyCh
+					if reply.Term > term {
+						hDone <- RaftState{role: FOLLOWER, term: reply.Term}
+						return
 					}
-					//if reply.Term > term {
-					//hDone <- RaftState{role: FOLLOWER, term: reply.Term}
-					//return
-					//}
 				}
 				hDone <- RaftState{role: LEADER, term: term}
 			}(heartbeatDone)
@@ -442,14 +443,16 @@ func (rf *Raft) maintainAuthorityLoop() {
 				rf.mu.Lock()
 				rf.state.role = r.role
 				rf.state.term = r.term
+				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.term)
 				rf.mu.Unlock()
-				wait = true
+				nextCh = nil
 				rf.electionProcess.start <- true
 			}
 		case <-rf.maintainProces.start:
-			wait = false
+			nextCh = time.After(0)
+			heartbeatDone = nil
 		case <-rf.maintainProces.end:
-			wait = true
+			nextCh = nil
 			heartbeatDone = nil
 		}
 	}
