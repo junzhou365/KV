@@ -18,15 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"log"
 	"math/rand"
 	"sync"
 	"time"
 )
-
-// import "bytes"
-// import "encoding/gob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -67,10 +66,10 @@ type RaftEntry struct {
 }
 
 type RaftState struct {
-	term     int
-	votedFor int
-	role     int
-	log      []RaftEntry // initialized with term 0 entry (empty RaftEntry)
+	CurrentTerm int
+	VotedFor    int
+	role        int
+	Log         []RaftEntry // initialized with term 0 entry (empty RaftEntry)
 
 	commitIndex int
 	lastApplied int
@@ -104,14 +103,14 @@ const (
 	LEADER
 )
 
-// return currentTerm and whether this server
+// return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
 	rf.mu.Lock()
-	term = rf.state.term
+	term = rf.state.CurrentTerm
 	isleader = rf.state.role == LEADER
 	rf.mu.Unlock()
 	return term, isleader
@@ -131,6 +130,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.state.CurrentTerm)
+	e.Encode(rf.state.VotedFor)
+	e.Encode(rf.state.Log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -144,7 +150,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.state.CurrentTerm = 0
+		rf.state.VotedFor = -1
+		rf.state.Log = make([]RaftEntry, 1)
 		return
+	} else {
+		r := bytes.NewBuffer(data)
+		d := gob.NewDecoder(r)
+		d.Decode(&rf.state.CurrentTerm)
+		d.Decode(&rf.state.VotedFor)
+		d.Decode(&rf.state.Log)
 	}
 }
 
@@ -180,35 +195,37 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	var resCh chan resourceRes
 	resCh = <-rf.resourceCh
 	rf.mu.Lock()
+	rf.persist()
+
 	// update term
-	if args.Term > rf.state.term {
-		rf.state.term = args.Term
+	if args.Term > rf.state.CurrentTerm {
+		rf.state.CurrentTerm = args.Term
 		rf.state.role = FOLLOWER
-		rf.state.votedFor = -1
+		rf.state.VotedFor = -1
 	}
 
-	isLeaderTermValid := args.Term == rf.state.term
-	isVotedForValid := rf.state.votedFor == -1 || rf.state.votedFor == args.CandidateId
+	isLeaderTermValid := args.Term == rf.state.CurrentTerm
+	isVotedForValid := rf.state.VotedFor == -1 || rf.state.VotedFor == args.CandidateId
 	isEntryUpToDate := false
 	// Is it most up-to-date?
-	lastLogIndex := len(rf.state.log) - 1
+	lastLogIndex := len(rf.state.Log) - 1
 	DTPrintf("%d received RequestVote RPC req | lastLogIndex: %d\n", rf.me, lastLogIndex)
-	if len(rf.state.log) == 1 ||
-		args.LastLogTerm > rf.state.log[lastLogIndex].Term ||
-		args.LastLogTerm == rf.state.log[lastLogIndex].Term &&
+	if len(rf.state.Log) == 1 ||
+		args.LastLogTerm > rf.state.Log[lastLogIndex].Term ||
+		args.LastLogTerm == rf.state.Log[lastLogIndex].Term &&
 			args.LastLogIndex >= lastLogIndex {
 		isEntryUpToDate = true
 	}
 
 	if isLeaderTermValid && isVotedForValid && isEntryUpToDate {
 		reply.VoteGranted = true
-		// XXX: votedFor is implicitly updated in args.Term > term case
-		rf.state.votedFor = args.CandidateId
+		// XXX: VotedFor is implicitly updated in args.Term > term case
+		rf.state.VotedFor = args.CandidateId
 	} else {
 		reply.VoteGranted = false
 	}
 
-	reply.Term = rf.state.term
+	reply.Term = rf.state.CurrentTerm
 
 	DTPrintf("%d voted back to %d with reply %v\n", rf.me, args.CandidateId, reply)
 	rf.mu.Unlock()
@@ -242,14 +259,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	resCh = <-rf.resourceCh
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.persist()
 
 	DTPrintf("%d received Append RPC req for term %d. Its term is %d, commit is %d, log len is %d\n",
-		rf.me, args.Term, rf.state.term, rf.state.commitIndex, len(rf.state.log))
+		rf.me, args.Term, rf.state.CurrentTerm, rf.state.commitIndex, len(rf.state.Log))
 
 	r := rf.state.role
 	switch {
-	case args.Term > rf.state.term:
-		rf.state.term = args.Term
+	case args.Term > rf.state.CurrentTerm:
+		rf.state.CurrentTerm = args.Term
 		switch {
 		case r == CANDIDATE:
 			DTPrintf("%d switched to follower\n", rf.me)
@@ -259,8 +277,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			DTPrintf("%d update its follower term\n", rf.me)
 		}
 		rf.state.role = FOLLOWER
-	case args.Term < rf.state.term:
-		reply.Term = rf.state.term
+	case args.Term < rf.state.CurrentTerm:
+		reply.Term = rf.state.CurrentTerm
 		reply.Success = false
 		DTPrintf("%d received reset from stale leader\n", rf.me)
 		// Did not receive RPC from *current* leader
@@ -273,11 +291,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Fatal("In AppendEntriesReply Dead!")
 	}
 
-	reply.Term = rf.state.term
+	reply.Term = rf.state.CurrentTerm
 	reply.Success = true
 	// Is it a match?
-	if args.PrevLogIndex > len(rf.state.log)-1 ||
-		rf.state.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex > len(rf.state.Log)-1 ||
+		rf.state.Log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
 	}
 	if reply.Success {
@@ -285,9 +303,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			deleteIndex := args.PrevLogIndex + 1
 			for _, entry := range args.Entries {
 				switch {
-				case deleteIndex == len(rf.state.log) ||
-					rf.state.log[deleteIndex].Term != entry.Term:
-					rf.state.log = append(rf.state.log[:deleteIndex],
+				case deleteIndex == len(rf.state.Log) ||
+					rf.state.Log[deleteIndex].Term != entry.Term:
+					rf.state.Log = append(rf.state.Log[:deleteIndex],
 						args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
 					break
 				default:
@@ -296,7 +314,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if args.LeaderCommit > rf.state.commitIndex {
-			rf.state.commitIndex = min(args.LeaderCommit, len(rf.state.log)-1)
+			rf.state.commitIndex = min(args.LeaderCommit, len(rf.state.Log)-1)
 			rf.commit <- true
 		}
 	}
@@ -318,9 +336,9 @@ func (rf *Raft) commitLoop() {
 				lastApplied++
 				rf.mu.Lock()
 				rf.state.lastApplied = lastApplied
-				command := rf.state.log[lastApplied].Command
+				command := rf.state.Log[lastApplied].Command
 				DTPrintf("%d: applied the command at log index %d\n", rf.me, lastApplied)
-				DTPrintf("%d's log len is %d\n", rf.me, len(rf.state.log))
+				DTPrintf("%d's log len is %d\n", rf.me, len(rf.state.Log))
 				rf.mu.Unlock()
 				rf.applyCh <- ApplyMsg{Index: lastApplied, Command: command}
 			}
@@ -387,9 +405,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	} else {
 		DTPrintf("%d: Start is called with command %v\n", rf.me, command)
-		rf.state.log = append(rf.state.log, RaftEntry{Term: rf.state.term, Command: command})
-		index = len(rf.state.log) - 1
-		term = rf.state.term
+		rf.state.Log = append(rf.state.Log, RaftEntry{Term: rf.state.CurrentTerm, Command: command})
+		index = len(rf.state.Log) - 1
+		term = rf.state.CurrentTerm
 		rf.leaderProcess.newEntry <- true
 	}
 
@@ -419,10 +437,10 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 		log.Fatal("In electionLoop, Wrong Raft Role. Dead!!!")
 	}
 	rf.state.role = CANDIDATE
-	rf.state.term++
-	term := rf.state.term
+	rf.state.CurrentTerm++
+	term := rf.state.CurrentTerm
 	DTPrintf("%d becomes candidate for term %d\n", rf.me, term)
-	rf.state.votedFor = rf.me
+	rf.state.VotedFor = rf.me
 	rf.mu.Unlock()
 
 	t := getRandomDuration()
@@ -432,13 +450,13 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 	args := new(RequestVoteArgs)
 	args.Term = term
 	args.CandidateId = rf.me
-	args.LastLogIndex = len(rf.state.log) - 1
-	args.LastLogTerm = rf.state.log[args.LastLogIndex].Term
+	args.LastLogIndex = len(rf.state.Log) - 1
+	args.LastLogTerm = rf.state.Log[args.LastLogIndex].Term
 
 	electionDone := make(chan RaftState)
 	go func(vDone chan RaftState) {
 		rf.mu.Lock()
-		term := rf.state.term
+		term := rf.state.CurrentTerm
 		rf.mu.Unlock()
 		// Should not use sync.WaitGroup here because that might block for too long time.
 		//replies := make([]RequestVoteReply, len(rf.peers))
@@ -466,7 +484,7 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 			DTPrintf("%d got requestVote with reply %v from %d for term %d\n", rf.me, reply, reply.index, term)
 			switch {
 			case reply.Term > term:
-				vDone <- RaftState{role: FOLLOWER, term: reply.Term}
+				vDone <- RaftState{role: FOLLOWER, CurrentTerm: reply.Term}
 				return
 			case reply.VoteGranted:
 				yays++
@@ -476,14 +494,14 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 
 			switch {
 			case yays+1 > len(rf.peers)/2:
-				vDone <- RaftState{role: LEADER, term: term}
+				vDone <- RaftState{role: LEADER, CurrentTerm: term}
 				return
 			case neys > (len(rf.peers)+1)/2-1:
-				vDone <- RaftState{role: FOLLOWER, term: term}
+				vDone <- RaftState{role: FOLLOWER, CurrentTerm: term}
 				return
 			}
 		}
-		vDone <- RaftState{role: FOLLOWER, term: term}
+		vDone <- RaftState{role: FOLLOWER, CurrentTerm: term}
 	}(electionDone)
 
 	return startElecCh, electionDone
@@ -493,9 +511,9 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 	rf.mu.Lock()
 	var llog []RaftEntry
-	llog = append(llog, rf.state.log...)
+	llog = append(llog, rf.state.Log...)
 	DTPrintf("%d: Current log len is %d\n", rf.me, len(llog))
-	term := rf.state.term
+	term := rf.state.CurrentTerm
 	role := rf.state.role
 	var nextIndexes []int
 	nextIndexes = append(nextIndexes, rf.state.nextIndexes...)
@@ -571,14 +589,14 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 
 		rf.mu.Lock()
 		count := 1
-		for n := len(rf.state.log) - 1; n > rf.state.commitIndex; n-- {
+		for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
 			DTPrintf("%d: try to find n. matches: %v, n: %d, commit: %d\n", rf.me, rf.state.matchIndexes, n, rf.state.commitIndex)
 			for j := 0; j < len(rf.peers); j++ {
 				if j != rf.me && rf.state.matchIndexes[j] >= n {
 					count++
 				}
 			}
-			if count > len(rf.peers)/2 && n > 0 && rf.state.term == rf.state.log[n].Term {
+			if count > len(rf.peers)/2 && n > 0 && rf.state.CurrentTerm == rf.state.Log[n].Term {
 				DTPrintf("%d: commitIndex %d is update to %d\n", rf.me, rf.state.commitIndex, n)
 				rf.state.commitIndex = n
 				rf.commit <- true
@@ -593,10 +611,10 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 
 func (rf *Raft) sendHB() chan RaftState {
 	rf.mu.Lock()
-	term := rf.state.term
+	term := rf.state.CurrentTerm
 	leaderCommit := rf.state.commitIndex
-	prevLogIndex := len(rf.state.log) - 1
-	prevLogTerm := rf.state.log[prevLogIndex].Term
+	prevLogIndex := len(rf.state.Log) - 1
+	prevLogTerm := rf.state.Log[prevLogIndex].Term
 	rf.mu.Unlock()
 
 	DTPrintf("%d starts sending HB for term %d\n", rf.me, term)
@@ -631,11 +649,11 @@ func (rf *Raft) sendHB() chan RaftState {
 		for i := 0; i < len(rf.peers)-1; i++ {
 			reply := <-replyCh
 			if reply.Term > term {
-				hDone <- RaftState{role: FOLLOWER, term: reply.Term}
+				hDone <- RaftState{role: FOLLOWER, CurrentTerm: reply.Term}
 				return
 			}
 		}
-		hDone <- RaftState{role: LEADER, term: term}
+		hDone <- RaftState{role: LEADER, CurrentTerm: term}
 	}(heartbeatDone)
 
 	return heartbeatDone
@@ -659,16 +677,16 @@ func (rf *Raft) loop() {
 			electionDone = nil
 			rf.mu.Lock()
 			rf.state.role = r.role
-			rf.state.term = r.term
+			rf.state.CurrentTerm = r.CurrentTerm
 			if r.role == LEADER {
 				DTPrintf("======= %d become a leader for term %d, its log len is %d, committed at %d =======\n",
-					rf.me, r.term, len(rf.state.log), rf.state.commitIndex)
+					rf.me, r.CurrentTerm, len(rf.state.Log), rf.state.commitIndex)
 				startElecCh = nil
 				go func() {
 					rf.leaderProcess.start <- true
 				}()
 			} else {
-				DTPrintf("%d is not a leader for term %d\n", rf.me, r.term)
+				DTPrintf("%d is not a leader for term %d\n", rf.me, r.CurrentTerm)
 			}
 			rf.mu.Unlock()
 		case <-rf.electionProcess.start:
@@ -693,8 +711,8 @@ func (rf *Raft) loop() {
 			if r.role == FOLLOWER {
 				rf.mu.Lock()
 				rf.state.role = r.role
-				rf.state.term = r.term
-				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.term)
+				rf.state.CurrentTerm = r.CurrentTerm
+				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.CurrentTerm)
 				rf.mu.Unlock()
 				go func() {
 					rf.electionProcess.start <- true
@@ -709,7 +727,7 @@ func (rf *Raft) loop() {
 			rf.mu.Lock()
 			rf.state.nextIndexes = make([]int, len(rf.peers))
 			for i := 0; i < len(rf.peers); i++ {
-				rf.state.nextIndexes[i] = len(rf.state.log)
+				rf.state.nextIndexes[i] = len(rf.state.Log)
 			}
 			rf.state.matchIndexes = make([]int, len(rf.peers))
 			rf.mu.Unlock()
@@ -721,7 +739,7 @@ func (rf *Raft) loop() {
 			appendDone = nil
 			if !reply.Success {
 				rf.mu.Lock()
-				rf.state.term = reply.Term
+				rf.state.CurrentTerm = reply.Term
 				rf.state.role = FOLLOWER
 				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, reply.Term)
 				nextHBCh = nil
@@ -762,9 +780,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.readPersist(rf.persister.ReadRaftState())
 	rf.state.role = FOLLOWER
-	rf.state.votedFor = -1
-	rf.state.log = make([]RaftEntry, 1)
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
 	rf.resourceCh = make(chan chan resourceRes)
