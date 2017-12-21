@@ -348,10 +348,14 @@ func TestBackup2B(t *testing.T) {
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
+		DTPrintf("<<<=== Step 1 - %d, 50 commands on %d\n", i, leader1)
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
+
+	DTPrintf("<<<=== disconnect old quorum %d and %d\n",
+		(leader1+0)%servers, (leader1+1)%servers)
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
@@ -363,6 +367,7 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
+		DTPrintf("<<<=== Step 2 - %d, 50 commands\n", i)
 		cfg.one(rand.Int(), 3)
 	}
 
@@ -373,9 +378,11 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	DTPrintf("<<<=== disconnect other %d\n", other)
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
+		DTPrintf("<<<=== Step 3 - %d, 50 commands on %d\n", i, leader2)
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
@@ -391,6 +398,7 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
+		DTPrintf("<<<=== Step 4 - %d, 50 commands\n", i)
 		cfg.one(rand.Int(), 3)
 	}
 
