@@ -101,6 +101,7 @@ func TestBasicAgree2B(t *testing.T) {
 		}
 
 		xindex := cfg.one(index*100, servers)
+		DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", xindex)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
@@ -117,25 +118,38 @@ func TestFailAgree2B(t *testing.T) {
 	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
 
 	cfg.one(101, servers)
+	DTESTPrintf("\033[34m==== agree on 101 ====\033[0m\n")
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
+	DTESTPrintf("\033[34m==== disconnect %d====\033[0m\n", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1)
+	DTESTPrintf("\033[34m==== agree on 102 ====\033[0m\n")
 	cfg.one(103, servers-1)
+	DTESTPrintf("\033[34m==== agree on 103 ====\033[0m\n")
+	DTESTPrintf("\033[34m==== Sleep ====\033[0m\n")
 	time.Sleep(RaftElectionTimeout)
+	DTESTPrintf("\033[34m==== Wakeup ====\033[0m\n")
 	cfg.one(104, servers-1)
+	DTESTPrintf("\033[34m==== agree on 104 ====\033[0m\n")
 	cfg.one(105, servers-1)
+	DTESTPrintf("\033[34m==== agree on 105 ====\033[0m\n")
 
 	// re-connect
+	DTESTPrintf("\033[34m==== reconnect %d====\033[0m\n", (leader+1)%servers)
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
+	DTESTPrintf("\033[34m==== agree on 106 ====\033[0m\n")
+	DTESTPrintf("\033[34m==== Sleep ====\033[0m\n")
 	time.Sleep(RaftElectionTimeout)
+	DTESTPrintf("\033[34m==== Wakeup ====\033[0m\n")
 	cfg.one(107, servers)
+	DTESTPrintf("\033[34m==== agree on 107 ====\033[0m\n")
 
 	fmt.Printf("  ... Passed\n")
 }
@@ -719,21 +733,26 @@ func TestUnreliableAgree2C(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for iters := 1; iters < 50; iters++ {
+		DTESTPrintf("\033[34m==== iters %d ====\033[0m\n", iters)
 		for j := 0; j < 4; j++ {
 			wg.Add(1)
 			go func(iters, j int) {
 				defer wg.Done()
 				cfg.one((100*iters)+j, 1)
+				DTESTPrintf("\033[34m==== agreed on %d ====\033[0m\n", (100*iters)+j)
 			}(iters, j)
 		}
 		cfg.one(iters, 1)
+		DTESTPrintf("\033[34m==== agreed on (outer) %d ====\033[0m\n", iters)
 	}
 
 	cfg.setunreliable(false)
 
 	wg.Wait()
+	DTESTPrintf("\033[34m==== singles done ====\033[0m\n")
 
 	cfg.one(100, servers)
+	DTESTPrintf("\033[34m==== finally agreed on 100 ====\033[0m\n")
 
 	fmt.Printf("  ... Passed\n")
 }
