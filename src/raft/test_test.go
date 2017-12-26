@@ -49,20 +49,20 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
-	DTPrintf("==== disconnect leader %d ====\n", leader1)
+	DTESTPrintf("==== disconnect leader %d ====\n", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
-	DTPrintf("==== rejoin old leader %d ====\n", leader1)
+	DTESTPrintf("==== rejoin old leader %d ====\n", leader1)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
-	DTPrintf("==== no quorum (disconnect %d, %d) ====\n", leader2, (leader2+1)%servers)
+	DTESTPrintf("==== no quorum (disconnect %d, %d) ====\n", leader2, (leader2+1)%servers)
 
 	// if there's no quorum, no leader should
 	// be elected.
@@ -71,13 +71,13 @@ func TestReElection2A(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
-	DTPrintf("==== new quorum (reconnect %d) ====\n", (leader2+1)%servers)
+	DTESTPrintf("==== new quorum (reconnect %d) ====\n", (leader2+1)%servers)
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
-	DTPrintf("==== full quorum (reconnect %d) ====\n", leader2)
+	DTESTPrintf("==== full quorum (reconnect %d) ====\n", leader2)
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
@@ -362,13 +362,13 @@ func TestBackup2B(t *testing.T) {
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
-		DTPrintf("<<<=== Step 1 - %d, 50 commands on %d\n", i, leader1)
+		DTESTPrintf("<<<=== Step 1 - %d, 50 commands on %d\n", i, leader1)
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
-	DTPrintf("<<<=== disconnect old quorum %d and %d\n",
+	DTESTPrintf("<<<=== disconnect old quorum %d and %d\n",
 		(leader1+0)%servers, (leader1+1)%servers)
 
 	cfg.disconnect((leader1 + 0) % servers)
@@ -381,7 +381,7 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		DTPrintf("<<<=== Step 2 - %d, 50 commands\n", i)
+		DTESTPrintf("<<<=== Step 2 - %d, 50 commands\n", i)
 		cfg.one(rand.Int(), 3)
 	}
 
@@ -392,11 +392,11 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-	DTPrintf("<<<=== disconnect other %d\n", other)
+	DTESTPrintf("<<<=== disconnect other %d\n", other)
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
-		DTPrintf("<<<=== Step 3 - %d, 50 commands on %d\n", i, leader2)
+		DTESTPrintf("<<<=== Step 3 - %d, 50 commands on %d\n", i, leader2)
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
@@ -412,7 +412,7 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		DTPrintf("<<<=== Step 4 - %d, 50 commands\n", i)
+		DTESTPrintf("<<<=== Step 4 - %d, 50 commands\n", i)
 		cfg.one(rand.Int(), 3)
 	}
 
@@ -543,17 +543,21 @@ func TestPersist12C(t *testing.T) {
 	fmt.Printf("Test (2C): basic persistence ...\n")
 
 	cfg.one(11, servers)
+	DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", 11)
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i)
 	}
+	DTESTPrintf("\033[34m==== crashed all ====\033[0m\n")
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 		cfg.connect(i)
 	}
+	DTESTPrintf("\033[34m==== reconnected all ====\033[0m\n")
 
 	cfg.one(12, servers)
+	DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", 12)
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
