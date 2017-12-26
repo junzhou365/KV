@@ -484,15 +484,21 @@ func (rf *Raft) elect() (<-chan time.Time, chan RaftState) {
 	return startElecCh, electionDone
 }
 
+func (rf *Raft) run() {
+	for {
+		switch role := rf.state.getRole(); {
+		case role == LEADER:
+			rf.runLeader()
+		default:
+			rf.loop()
+		}
+	}
+}
+
 func (rf *Raft) loop() {
-	var heartbeatDone chan RaftState
-	// Used for sinking outdated RPC replies
-	var appendDone chan AppendEntriesReply
 	var electionDone chan RaftState
-	var nextHBCh <-chan time.Time
 	var startElecCh <-chan time.Time
 	var resCh chan resourceRes
-	last_seen_nei := 0
 	for {
 		if resCh == nil {
 			resCh = make(chan resourceRes)
@@ -506,18 +512,12 @@ func (rf *Raft) loop() {
 			rf.state.setCurrentTerm(r.CurrentTerm)
 			if r.role == LEADER {
 				DTPrintf("======= %d become a LEADER for term %d\n", rf.me, r.CurrentTerm)
-				//DTPrintf("======= %d become a LEADER for term %d, its log len is %d, committed at %d =======\n",
-				//rf.me, r.CurrentTerm, len(rf.state.Log), rf.state.commitIndex)
 				go func() { rf.leaderProcess.start <- true }()
-			} else {
-				DTPrintf("%d is not a leader for term %d\n", rf.me, r.CurrentTerm)
+				return
 			}
 		case <-rf.electionProcess.start:
 			startElecCh = time.After(getRandomDuration())
 			electionDone = nil
-			nextHBCh = nil
-			heartbeatDone = nil
-			appendDone = nil
 		case rf.resourceCh <- resCh:
 			// true is to reset
 			switch r := <-resCh; {
@@ -525,51 +525,6 @@ func (rf *Raft) loop() {
 				go func() { rf.electionProcess.start <- true }()
 			case r.kind == RES_APPEND && r.reset:
 				go func() { rf.electionProcess.start <- true }()
-			}
-		case <-nextHBCh:
-			nextHBCh = time.After(rf.heartbeatInterval)
-			heartbeatDone = rf.sendHB()
-		case r := <-heartbeatDone:
-			heartbeatDone = nil
-			if r.role == FOLLOWER {
-				rf.state.setRole(r.role)
-				rf.state.setCurrentTerm(r.CurrentTerm)
-				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.CurrentTerm)
-				go func() {
-					rf.electionProcess.start <- true
-				}()
-			}
-		case <-rf.leaderProcess.start:
-			startElecCh = nil
-			electionDone = nil
-			nextHBCh = time.After(0)
-			heartbeatDone = nil
-			appendDone = nil
-			rf.state.rw.Lock()
-			rf.state.nextIndexes = make([]int, len(rf.peers))
-			for i := 0; i < len(rf.peers); i++ {
-				rf.state.nextIndexes[i] = len(rf.state.Log)
-			}
-			rf.state.matchIndexes = make([]int, len(rf.peers))
-			rf.state.rw.Unlock()
-		case nei := <-rf.leaderProcess.newEntry:
-			if nei > last_seen_nei {
-				DTPrintf("%d: newEntry at %d\n", rf.me, nei)
-				appendDone = make(chan AppendEntriesReply)
-				go rf.appendNewEntries(appendDone)
-				last_seen_nei = nei
-			}
-		case reply := <-appendDone:
-			appendDone = nil
-			if !reply.Success {
-				rf.state.setCurrentTerm(reply.Term)
-				rf.state.setRole(FOLLOWER)
-				DTPrintf("%d discovered new leader for term %d, switch to follower",
-					rf.me, reply.Term)
-				nextHBCh = nil
-				go func() { rf.electionProcess.start <- true }()
-			} else {
-				DTPrintf("%d updated its commitIndex\n", rf.me)
 			}
 		}
 	}
@@ -614,7 +569,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commit = make(chan bool)
 	rf.applyCh = applyCh
 
-	go rf.loop()
+	go rf.run()
 	go rf.commitLoop()
 	go func() {
 		rf.electionProcess.start <- true

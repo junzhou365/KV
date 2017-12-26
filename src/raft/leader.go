@@ -2,7 +2,64 @@ package raft
 
 import (
 	"log"
+	"time"
 )
+
+func (rf *Raft) runLeader() {
+	var nextHBCh <-chan time.Time
+	var heartbeatDone chan RaftState
+	// Used for sinking outdated RPC replies
+	var appendDone chan AppendEntriesReply
+	last_seen_nei := 0
+	for {
+		select {
+		case <-nextHBCh:
+			nextHBCh = time.After(rf.heartbeatInterval)
+			heartbeatDone = rf.sendHB()
+		case r := <-heartbeatDone:
+			heartbeatDone = nil
+			if r.role == FOLLOWER {
+				rf.state.setRole(r.role)
+				rf.state.setCurrentTerm(r.CurrentTerm)
+				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.CurrentTerm)
+				go func() {
+					rf.electionProcess.start <- true
+				}()
+				return
+			}
+		case <-rf.leaderProcess.start:
+			nextHBCh = time.After(0)
+			heartbeatDone = nil
+			appendDone = nil
+			rf.state.rw.Lock()
+			rf.state.nextIndexes = make([]int, len(rf.peers))
+			for i := 0; i < len(rf.peers); i++ {
+				rf.state.nextIndexes[i] = len(rf.state.Log)
+			}
+			rf.state.matchIndexes = make([]int, len(rf.peers))
+			rf.state.rw.Unlock()
+		case nei := <-rf.leaderProcess.newEntry:
+			if nei > last_seen_nei {
+				DTPrintf("%d: newEntry at %d\n", rf.me, nei)
+				appendDone = make(chan AppendEntriesReply)
+				go rf.appendNewEntries(appendDone)
+				last_seen_nei = nei
+			}
+		case reply := <-appendDone:
+			appendDone = nil
+			if !reply.Success {
+				rf.state.setCurrentTerm(reply.Term)
+				rf.state.setRole(FOLLOWER)
+				DTPrintf("%d discovered new leader for term %d, switch to follower",
+					rf.me, reply.Term)
+				nextHBCh = nil
+				go func() { rf.electionProcess.start <- true }()
+			} else {
+				DTPrintf("%d updated its commitIndex\n", rf.me)
+			}
+		}
+	}
+}
 
 //
 // example code to send a RequestVote RPC to a server.
