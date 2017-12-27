@@ -165,6 +165,8 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	resCh := <-rf.rpcCh
 	rf.persist()
 
@@ -182,6 +184,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		resp.toFollower = true
 	}
 
+	resCh <- resp
+
 	isLeaderTermValid := args.Term == curTerm
 	isVotedForValid := curVotedFor == -1 || curVotedFor == args.CandidateId
 	isEntryUpToDate := false
@@ -189,8 +193,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	logLen := rf.state.getLogLen()
 	lastLogIndex := logLen - 1
 	lastLogEntry := rf.state.getLogEntry(lastLogIndex)
-	DTPrintf("%d received RequestVote RPC req | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
-		rf.me, curVotedFor, lastLogIndex, logLen)
+	DTPrintf("%d received RequestVote RPC req %+v | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
+		rf.me, args, curVotedFor, lastLogIndex, logLen)
 	if logLen == 1 || args.LastLogTerm > lastLogEntry.Term ||
 		args.LastLogTerm == lastLogEntry.Term && args.LastLogIndex >= lastLogIndex {
 		isEntryUpToDate = true
@@ -207,7 +211,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = curTerm
 
 	DTPrintf("%d voted back to %d with reply %v\n", rf.me, args.CandidateId, reply)
-	resCh <- resp
 }
 
 type AppendEntriesArgs struct {
@@ -235,34 +238,41 @@ func min(a int, b int) int {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
 	rf.persist()
 
 	curTerm := rf.state.getCurrentTerm()
+	resp := rpcResp{toFollower: false}
 	switch {
 	case args.Term > curTerm:
 		curTerm = args.Term
 		rf.state.setCurrentTerm(curTerm)
 		rf.state.setRole(FOLLOWER)
+		resp.toFollower = true
 	case args.Term < curTerm:
 		reply.Term = curTerm
 		reply.Success = false
 		//DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
 		// Did not receive RPC from *current* leader
-		resCh <- rpcResp{toFollower: false}
+		resp.toFollower = false
+		resCh <- resp
 		return
 	}
 
+	// At this point the role could only be FOLLOWER and CANDIDATE.
 	if rf.state.getRole() == LEADER {
 		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n",
 			args.Term, rf.me)
 		log.Fatal("In AppendEntriesReply Dead!")
 	}
 
-	reply.Term = curTerm
-
 	rf.state.setRole(FOLLOWER)
+	resCh <- resp
+
+	reply.Term = curTerm
 	logLen := rf.state.getLogLen()
 
 	switch {
@@ -289,6 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				switch {
 				case deleteIndex == logLen ||
 					rf.state.getLogEntry(deleteIndex).Term != entry.Term:
+					// delete conflicted entries
 					rf.state.rw.Lock()
 					rf.state.Log = append(rf.state.Log[:deleteIndex],
 						args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
@@ -304,8 +315,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			go func() { rf.commit <- true }()
 		}
 	}
-
-	resCh <- rpcResp{toFollower: true}
 }
 
 func (rf *Raft) commitLoop() {

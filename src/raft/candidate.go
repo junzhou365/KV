@@ -19,7 +19,7 @@ func (rf *Raft) runCandidate() {
 	electionResCh := rf.elect(term)
 
 	electionTimeoutTimer := time.After(getElectionTimeout())
-	DTPrintf("%d becomes candidate for term %d\n", rf.me, term)
+	DTPrintf("%d collects votes for term %d\n", rf.me, term)
 
 	respCh := make(chan rpcResp)
 	votes := 1
@@ -27,13 +27,12 @@ func (rf *Raft) runCandidate() {
 		select {
 		case rf.rpcCh <- respCh:
 			r := <-respCh
-			DTPrintf("%d: the fucking candidate r is %v!\n", rf.me, r)
 			if r.toFollower {
 				return
 			}
 
 		case reply := <-electionResCh:
-			DTPrintf("%d got requestVote with reply %v from %d for term %d\n",
+			DTPrintf("%d got requestVote with reply %+v from %d for term %d\n",
 				rf.me, reply, reply.index, reply.Term)
 			switch {
 			case reply.Term > term:
@@ -76,7 +75,7 @@ func (rf *Raft) elect(term int) chan RequestVoteReply {
 		go func(i int) {
 			DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
 			reply := RequestVoteReply{index: i}
-			for ok := false; !ok; {
+			for ok := false; !ok && term == rf.state.getCurrentTerm(); {
 				ok = rf.sendRequestVote(i, args, &reply)
 			}
 

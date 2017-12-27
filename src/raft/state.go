@@ -101,6 +101,12 @@ func (rs *RaftState) setLastApplied(a int) {
 	rs.lastApplied = a
 }
 
+func (rs *RaftState) getNextIndex(i int) int {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.nextIndexes[i]
+}
+
 func (rs *RaftState) setNextIndex(i int, n int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()

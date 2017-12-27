@@ -779,8 +779,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
-		DTESTPrintf("iters %d", iters)
 		if iters == 200 {
+			DTESTPrintf("iters %d", iters)
 			cfg.setlongreordering(true)
 		}
 		leader := -1
@@ -789,8 +789,8 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			if ok && cfg.connected[i] {
 				leader = i
 			}
-			a_t, a_l := cfg.rafts[i].GetState()
-			DTESTPrintf("term %d: %d is leader ? %t", a_t, i, a_l)
+			//a_t, a_l := cfg.rafts[i].GetState()
+			//DTESTPrintf("term %d: %d is leader ? %t", a_t, i, a_l)
 		}
 
 		if (rand.Int() % 1000) < 100 {
@@ -802,7 +802,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			DTESTPrintf("disconnect %d", leader)
+			//DTESTPrintf("disconnect %d", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
