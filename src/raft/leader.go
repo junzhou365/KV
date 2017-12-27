@@ -6,54 +6,61 @@ import (
 )
 
 func (rf *Raft) runLeader() {
-	var nextHBCh <-chan time.Time
-	var heartbeatDone chan RaftState
-	// Used for sinking outdated RPC replies
-	var appendDone chan AppendEntriesReply
+	// Initiliaze next and match indexes
+	rf.state.rw.Lock()
+	rf.state.nextIndexes = make([]int, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.state.nextIndexes[i] = len(rf.state.Log)
+	}
+	rf.state.matchIndexes = make([]int, len(rf.peers))
+	rf.state.rw.Unlock()
+
+	heartbeatTimer := time.After(0)
+	var heartbeatReplyCh chan AppendEntriesReply
+	var appendReplyCh chan AppendEntriesReply
+	// nei: new entry index
 	last_seen_nei := 0
+
+	respCh := make(chan rpcResp)
+
 	for {
 		select {
-		case <-nextHBCh:
-			nextHBCh = time.After(rf.heartbeatInterval)
-			heartbeatDone = rf.sendHB()
-		case r := <-heartbeatDone:
-			heartbeatDone = nil
-			if r.role == FOLLOWER {
-				rf.state.setRole(r.role)
-				rf.state.setCurrentTerm(r.CurrentTerm)
-				DTPrintf("%d discovered new leader for term %d, switch to follower", rf.me, r.CurrentTerm)
-				go func() {
-					rf.electionProcess.start <- true
-				}()
+		case rf.rpcCh <- respCh:
+			if r := <-respCh; r.toFollower {
+				DTPrintf("%d: leader to follower!\n", rf.me)
 				return
 			}
-		case <-rf.leaderProcess.start:
-			nextHBCh = time.After(0)
-			heartbeatDone = nil
-			appendDone = nil
-			rf.state.rw.Lock()
-			rf.state.nextIndexes = make([]int, len(rf.peers))
-			for i := 0; i < len(rf.peers); i++ {
-				rf.state.nextIndexes[i] = len(rf.state.Log)
+
+		case <-heartbeatTimer:
+			heartbeatTimer = time.After(rf.heartbeatInterval)
+			heartbeatReplyCh = rf.sendHeartbeat()
+
+		case r := <-heartbeatReplyCh:
+			if r.Term > rf.state.getCurrentTerm() {
+				rf.state.setRole(FOLLOWER)
+				rf.state.setCurrentTerm(r.Term)
+				DTPrintf("%d discovered new leader for term %d, switch to follower",
+					rf.me, r.Term)
+				return
 			}
-			rf.state.matchIndexes = make([]int, len(rf.peers))
-			rf.state.rw.Unlock()
+
 		case nei := <-rf.leaderProcess.newEntry:
 			if nei > last_seen_nei {
 				DTPrintf("%d: newEntry at %d\n", rf.me, nei)
-				appendDone = make(chan AppendEntriesReply)
-				go rf.appendNewEntries(appendDone)
+				appendReplyCh = make(chan AppendEntriesReply)
+				go rf.appendNewEntries(appendReplyCh)
 				last_seen_nei = nei
 			}
-		case reply := <-appendDone:
-			appendDone = nil
+
+		case reply := <-appendReplyCh:
+			appendReplyCh = nil
 			if !reply.Success {
 				rf.state.setCurrentTerm(reply.Term)
 				rf.state.setRole(FOLLOWER)
 				DTPrintf("%d discovered new leader for term %d, switch to follower",
 					rf.me, reply.Term)
-				nextHBCh = nil
-				go func() { rf.electionProcess.start <- true }()
+				heartbeatTimer = nil
+				return
 			} else {
 				DTPrintf("%d updated its commitIndex\n", rf.me)
 			}
@@ -96,7 +103,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 // Should run in order
-func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
+func (rf *Raft) appendNewEntries(appendReplyCh chan AppendEntriesReply) {
 	var llog []RaftLogEntry
 	var localNextIndexes []int
 	rf.state.rw.RLock()
@@ -113,6 +120,54 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 	}
 
 	replyCh := make(chan AppendEntriesReply)
+
+	sendAppend := func(i int, next int) {
+		for rf.state.getCurrentTerm() == curTerm {
+			args := AppendEntriesArgs{}
+			args.Term = curTerm
+			args.PrevLogIndex = next - 1
+			args.PrevLogTerm = llog[args.PrevLogIndex].Term
+			args.Entries = llog[next:]
+			args.LeaderCommit = leaderCommit
+
+			reply := new(AppendEntriesReply)
+			DTPrintf("%d sends Append RPC to %d for term %d\n", rf.me, i, curTerm)
+			for ok := false; !ok; {
+				ok = rf.peers[i].Call("Raft.AppendEntries", &args, reply)
+			}
+			switch {
+			case !reply.Success && reply.Term > curTerm:
+				replyCh <- *reply
+				return
+			case !reply.Success && reply.ConflictTerm == -1:
+				// Follower doesn't have the entry with that term. len of
+				// follower's log is shorter than the leader's.
+				next = reply.ConflictIndex
+				DTPrintf("%d try to resend Append RPC to %d with conflicted index %d\n",
+					rf.me, i, next)
+			case !reply.Success && reply.ConflictTerm != -1:
+				j := len(llog) - 1
+				for ; j > 0; j-- {
+					if llog[j].Term == reply.ConflictTerm {
+						break
+					}
+				}
+				next = j + 1
+				DTPrintf("%d try to resend Append RPC to %d with decremented index %d\n",
+					rf.me, i, next)
+			case reply.Success:
+				rf.state.setNextIndex(i, next+len(args.Entries))
+				rf.state.setMatchIndex(i, args.PrevLogIndex+len(args.Entries))
+				reply.index = i
+				DTPrintf("%d: got Append RPC from %d for term %d\n", rf.me, i, curTerm)
+				replyCh <- *reply
+				return
+			default:
+				DTPrintf("!!! reply: %v, term: %d\n", reply, curTerm)
+				log.Fatal("!!! Incorrect Append RPC reply")
+			}
+		}
+	}
 	for i, next := range localNextIndexes {
 		if next > len(llog)-1 {
 			DTPrintf("%d: follower %d's next %d than last log index\n", rf.me, i, next)
@@ -124,58 +179,14 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 			rf.persist()
 			continue
 		}
-		go func(i int, next int) {
-			for {
-				args := AppendEntriesArgs{}
-				args.Term = curTerm
-				args.PrevLogIndex = next - 1
-				args.PrevLogTerm = llog[args.PrevLogIndex].Term
-				args.Entries = llog[next:]
-				args.LeaderCommit = leaderCommit
-
-				reply := new(AppendEntriesReply)
-				DTPrintf("%d sends Append RPC to %d for term %d\n", rf.me, i, curTerm)
-				for ok := false; !ok; {
-					ok = rf.peers[i].Call("Raft.AppendEntries", &args, reply)
-				}
-				switch {
-				case !reply.Success && reply.Term > curTerm:
-					replyCh <- *reply
-					return
-				case !reply.Success && reply.ConflictTerm == -1:
-					// Follower doesn't have the entry with that term. len of
-					// follower's log is shorter than the leader's.
-					next = reply.ConflictIndex
-					DTPrintf("%d resend Append RPC to %d with conflicted index %d\n", rf.me, i, next)
-				case !reply.Success && reply.ConflictTerm != -1:
-					j := len(llog) - 1
-					for ; j > 0; j-- {
-						if llog[j].Term == reply.ConflictTerm {
-							break
-						}
-					}
-					next = j + 1
-					DTPrintf("%d resend Append RPC to %d with decremented index %d\n", rf.me, i, next)
-				case reply.Success:
-					rf.state.setNextIndex(i, next+len(args.Entries))
-					rf.state.setMatchIndex(i, args.PrevLogIndex+len(args.Entries))
-					reply.index = i
-					DTPrintf("%d: got Append RPC from %d for term %d\n", rf.me, i, curTerm)
-					replyCh <- *reply
-					return
-				default:
-					DTPrintf("!!! reply: %v, term: %d\n", reply, curTerm)
-					log.Fatal("!!! Incorrect Append RPC reply")
-				}
-			}
-		}(i, next)
+		go sendAppend(i, next)
 	}
 
 	received := 1
 	for i := 0; i < len(rf.peers)-1; i++ {
 		r := <-replyCh
 		if !r.Success {
-			appendDone <- r
+			appendReplyCh <- r
 			return
 		}
 
@@ -185,9 +196,11 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 		}
 
 		count := 1
+
 		rf.state.rw.RLock()
 		for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
-			//DTPrintf("%d: try to find n. matches: %v, n: %d, commit: %d\n", rf.me, rf.state.matchIndexes, n, rf.state.commitIndex)
+			//DTPrintf("%d: try to find n. matches: %v, n: %d, commit: %d\n",
+			//rf.me, rf.state.matchIndexes, n, rf.state.commitIndex)
 			for j := 0; j < len(rf.peers); j++ {
 				if j != rf.me && rf.state.matchIndexes[j] >= n {
 					count++
@@ -203,50 +216,45 @@ func (rf *Raft) appendNewEntries(appendDone chan AppendEntriesReply) {
 		rf.state.rw.RUnlock()
 	}
 
-	appendDone <- AppendEntriesReply{Term: curTerm, Success: true}
+	appendReplyCh <- AppendEntriesReply{Term: curTerm, Success: true}
 }
 
-func (rf *Raft) sendHB() chan RaftState {
+func (rf *Raft) sendHeartbeat() chan AppendEntriesReply {
 	term := rf.state.getCurrentTerm()
 	leaderCommit := rf.state.getCommitIndex()
 	prevLogIndex := rf.state.getLogLen() - 1
 	prevLogTerm := rf.state.getLogEntry(prevLogIndex).Term
 
 	DTPrintf("%d starts sending HB for term %d\n", rf.me, term)
+	// the channel is only used for this term
+	heartbeatReplyCh := make(chan AppendEntriesReply)
 
-	heartbeatDone := make(chan RaftState) // the channel is only used for this term
-	go func(hDone chan RaftState) {
-		//replies := make([]AppendEntriesReply, len(rf.peers))
-		replyCh := make(chan AppendEntriesReply)
+	sendAppend := func(i int) {
+		args := AppendEntriesArgs{}
+		args.Term = term
+		args.PrevLogIndex = prevLogIndex
+		args.PrevLogTerm = prevLogTerm
+		args.LeaderCommit = leaderCommit
+		reply := AppendEntriesReply{}
+		DTPrintf("%d sends heartbeat to %d for term %d with args %v\n",
+			rf.me, i, term, args)
+		// Retry indefinitely and do not send outdated request
+		for ok := false; !ok && term == rf.state.getCurrentTerm(); {
+			ok = rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+		}
+		//DTPrintf("%d got heartbeat reply %v from %d for term %d\n",
+		//rf.me, reply, i, term)
+		heartbeatReplyCh <- reply
+	}
+
+	go func() {
 		for i, _ := range rf.peers {
 			if i == rf.me {
 				continue
 			}
-			go func(i int) {
-				args := AppendEntriesArgs{}
-				args.Term = term
-				args.PrevLogIndex = prevLogIndex
-				args.PrevLogTerm = prevLogTerm
-				args.LeaderCommit = leaderCommit
-				reply := AppendEntriesReply{}
-				//DTPrintf("%d sends heartbeat to %d for term %d with args %v\n", rf.me, i, term, args)
-				for ok := false; !ok; {
-					ok = rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
-				}
-				//DTPrintf("%d got heartbeat reply %v from %d for term %d\n", rf.me, reply, i, term)
-				replyCh <- reply
-			}(i)
+			go sendAppend(i)
 		}
+	}()
 
-		for i := 0; i < len(rf.peers)-1; i++ {
-			reply := <-replyCh
-			if reply.Term > term {
-				hDone <- RaftState{role: FOLLOWER, CurrentTerm: reply.Term}
-				return
-			}
-		}
-		hDone <- RaftState{role: LEADER, CurrentTerm: term}
-	}(heartbeatDone)
-
-	return heartbeatDone
+	return heartbeatReplyCh
 }

@@ -49,20 +49,20 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
-	DTESTPrintf("==== disconnect leader %d ====\n", leader1)
+	DTESTPrintf("disconnect leader %d", leader1)
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
-	DTESTPrintf("==== rejoin old leader %d ====\n", leader1)
+	DTESTPrintf("rejoin old leader %d", leader1)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
-	DTESTPrintf("==== no quorum (disconnect %d, %d) ====\n", leader2, (leader2+1)%servers)
+	DTESTPrintf("no quorum (disconnect %d, %d)", leader2, (leader2+1)%servers)
 
 	// if there's no quorum, no leader should
 	// be elected.
@@ -71,13 +71,13 @@ func TestReElection2A(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
-	DTESTPrintf("==== new quorum (reconnect %d) ====\n", (leader2+1)%servers)
+	DTESTPrintf("new quorum (reconnect %d)", (leader2+1)%servers)
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
-	DTESTPrintf("==== full quorum (reconnect %d) ====\n", leader2)
+	DTESTPrintf("full quorum (reconnect %d)", leader2)
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
@@ -101,7 +101,7 @@ func TestBasicAgree2B(t *testing.T) {
 		}
 
 		xindex := cfg.one(index*100, servers)
-		DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", xindex)
+		DTESTPrintf("agree on %d", xindex)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
@@ -118,38 +118,38 @@ func TestFailAgree2B(t *testing.T) {
 	fmt.Printf("Test (2B): agreement despite follower disconnection ...\n")
 
 	cfg.one(101, servers)
-	DTESTPrintf("\033[34m==== agree on 101 ====\033[0m\n")
+	DTESTPrintf("agree on 101")
 
 	// follower network disconnection
 	leader := cfg.checkOneLeader()
-	DTESTPrintf("\033[34m==== disconnect %d====\033[0m\n", (leader+1)%servers)
+	DTESTPrintf("disconnect %d", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1)
-	DTESTPrintf("\033[34m==== agree on 102 ====\033[0m\n")
+	DTESTPrintf("agree on 102")
 	cfg.one(103, servers-1)
-	DTESTPrintf("\033[34m==== agree on 103 ====\033[0m\n")
-	DTESTPrintf("\033[34m==== Sleep ====\033[0m\n")
+	DTESTPrintf("agree on 103")
+	DTESTPrintf("Sleep")
 	time.Sleep(RaftElectionTimeout)
-	DTESTPrintf("\033[34m==== Wakeup ====\033[0m\n")
+	DTESTPrintf("Wakeup")
 	cfg.one(104, servers-1)
-	DTESTPrintf("\033[34m==== agree on 104 ====\033[0m\n")
+	DTESTPrintf("agree on 104")
 	cfg.one(105, servers-1)
-	DTESTPrintf("\033[34m==== agree on 105 ====\033[0m\n")
+	DTESTPrintf("agree on 105")
 
 	// re-connect
-	DTESTPrintf("\033[34m==== reconnect %d====\033[0m\n", (leader+1)%servers)
+	DTESTPrintf("reconnect %d", (leader+1)%servers)
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
-	DTESTPrintf("\033[34m==== agree on 106 ====\033[0m\n")
-	DTESTPrintf("\033[34m==== Sleep ====\033[0m\n")
+	DTESTPrintf("agree on 106")
+	DTESTPrintf("Sleep")
 	time.Sleep(RaftElectionTimeout)
-	DTESTPrintf("\033[34m==== Wakeup ====\033[0m\n")
+	DTESTPrintf("Wakeup")
 	cfg.one(107, servers)
-	DTESTPrintf("\033[34m==== agree on 107 ====\033[0m\n")
+	DTESTPrintf("agree on 107")
 
 	fmt.Printf("  ... Passed\n")
 }
@@ -362,13 +362,13 @@ func TestBackup2B(t *testing.T) {
 
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
-		DTESTPrintf("<<<=== Step 1 - %d, 50 commands on %d\n", i, leader1)
+		DTESTPrintf("Step 1 - %d, 50 commands on %d", i, leader1)
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
-	DTESTPrintf("<<<=== disconnect old quorum %d and %d\n",
+	DTESTPrintf("disconnect old quorum %d and %d",
 		(leader1+0)%servers, (leader1+1)%servers)
 
 	cfg.disconnect((leader1 + 0) % servers)
@@ -381,7 +381,7 @@ func TestBackup2B(t *testing.T) {
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		DTESTPrintf("<<<=== Step 2 - %d, 50 commands\n", i)
+		DTESTPrintf("Step 2 - %d, 50 commands", i)
 		cfg.one(rand.Int(), 3)
 	}
 
@@ -392,11 +392,11 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-	DTESTPrintf("<<<=== disconnect other %d\n", other)
+	DTESTPrintf("disconnect other %d", other)
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
-		DTESTPrintf("<<<=== Step 3 - %d, 50 commands on %d\n", i, leader2)
+		DTESTPrintf("Step 3 - %d, 50 commands on %d", i, leader2)
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
@@ -406,13 +406,18 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
+
+	DTESTPrintf("disconnected all")
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
+	DTESTPrintf("reconnected original quorum, %d, %d, %d",
+		(leader1+0)%servers, (leader1+1)%servers, other)
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
-		DTESTPrintf("<<<=== Step 4 - %d, 50 commands\n", i)
+		DTESTPrintf("Step 4 - %d, 50 commands", i)
 		cfg.one(rand.Int(), 3)
 	}
 
@@ -420,6 +425,8 @@ func TestBackup2B(t *testing.T) {
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
 	}
+
+	DTESTPrintf("connected all")
 	cfg.one(rand.Int(), servers)
 
 	fmt.Printf("  ... Passed\n")
@@ -543,21 +550,21 @@ func TestPersist12C(t *testing.T) {
 	fmt.Printf("Test (2C): basic persistence ...\n")
 
 	cfg.one(11, servers)
-	DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", 11)
+	DTESTPrintf("agree on %d", 11)
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
 		cfg.start1(i)
 	}
-	DTESTPrintf("\033[34m==== crashed all ====\033[0m\n")
+	DTESTPrintf("crashed all")
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 		cfg.connect(i)
 	}
-	DTESTPrintf("\033[34m==== reconnected all ====\033[0m\n")
+	DTESTPrintf("reconnected all")
 
 	cfg.one(12, servers)
-	DTESTPrintf("\033[34m==== agree on %d ====\033[0m\n", 12)
+	DTESTPrintf("agree on %d", 12)
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
@@ -737,26 +744,26 @@ func TestUnreliableAgree2C(t *testing.T) {
 	var wg sync.WaitGroup
 
 	for iters := 1; iters < 50; iters++ {
-		DTESTPrintf("\033[34m==== iters %d ====\033[0m\n", iters)
+		DTESTPrintf("iters %d", iters)
 		for j := 0; j < 4; j++ {
 			wg.Add(1)
 			go func(iters, j int) {
 				defer wg.Done()
 				cfg.one((100*iters)+j, 1)
-				DTESTPrintf("\033[34m==== agreed on %d ====\033[0m\n", (100*iters)+j)
+				DTESTPrintf("agreed on %d", (100*iters)+j)
 			}(iters, j)
 		}
 		cfg.one(iters, 1)
-		DTESTPrintf("\033[34m==== agreed on (outer) %d ====\033[0m\n", iters)
+		DTESTPrintf("agreed on (outer) %d", iters)
 	}
 
 	cfg.setunreliable(false)
 
 	wg.Wait()
-	DTESTPrintf("\033[34m==== singles done ====\033[0m\n")
+	DTESTPrintf("singles done")
 
 	cfg.one(100, servers)
-	DTESTPrintf("\033[34m==== finally agreed on 100 ====\033[0m\n")
+	DTESTPrintf("finally agreed on 100")
 
 	fmt.Printf("  ... Passed\n")
 }
@@ -772,7 +779,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
-		DTESTPrintf("\033[34m==== iters %d ====\033[0m\n", iters)
+		DTESTPrintf("iters %d", iters)
 		if iters == 200 {
 			cfg.setlongreordering(true)
 		}
@@ -783,8 +790,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 				leader = i
 			}
 			a_t, a_l := cfg.rafts[i].GetState()
-			DTESTPrintf("\033[34m==== term %d: %d is leader ? %t ====\033[0m\n", a_t, i, a_l)
-			//DTESTPrintf("==== its log is %v\n", cfg.rafts[i].state.Log)
+			DTESTPrintf("term %d: %d is leader ? %t", a_t, i, a_l)
 		}
 
 		if (rand.Int() % 1000) < 100 {
@@ -796,7 +802,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			DTESTPrintf("\033[34m==== disconnect %d ====\033[0m\n", leader)
+			DTESTPrintf("disconnect %d", leader)
 			cfg.disconnect(leader)
 			nup -= 1
 		}
@@ -816,6 +822,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 	}
 
+	DTESTPrintf("final step")
 	cfg.one(rand.Int()%10000, servers)
 
 	fmt.Printf("  ... Passed\n")

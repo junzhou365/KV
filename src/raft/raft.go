@@ -52,27 +52,21 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	state             RaftState
-	resourceCh        chan chan resourceRes
-	electionProcess   *electionProcess
+	rpcCh             chan chan rpcResp
 	leaderProcess     *leaderProcess
 	heartbeatInterval time.Duration
 	commit            chan bool
 	applyCh           chan ApplyMsg
 }
 
-type resourceRes struct {
-	kind  int
-	reset bool
+type rpcResp struct {
+	toFollower bool
 }
 
 const (
 	RES_VOTE = iota
 	RES_APPEND
 )
-
-type electionProcess struct {
-	start chan bool
-}
 
 type leaderProcess struct {
 	start    chan bool
@@ -174,19 +168,15 @@ type RequestVoteReply struct {
 	index       int // not needed for RPC
 }
 
-//
-// example RequestVote RPC handler.
-//
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DTPrintf("%d enter RequestVote, the arg: %+v\n", rf.me, args)
 	// Your code here (2A, 2B).
-	var resCh chan resourceRes
-	resCh = <-rf.resourceCh
+	resCh := <-rf.rpcCh
 	rf.persist()
 
 	curTerm := rf.state.getCurrentTerm()
 	curVotedFor := rf.state.getVotedFor()
 
+	resp := rpcResp{toFollower: false}
 	// update term
 	if args.Term > curTerm {
 		curTerm = args.Term
@@ -194,7 +184,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state.setRole(FOLLOWER)
 		curVotedFor = -1
 		rf.state.setVotedFor(curVotedFor)
-		go func() { rf.electionProcess.start <- true }()
+		resp.toFollower = true
 	}
 
 	isLeaderTermValid := args.Term == curTerm
@@ -222,7 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = curTerm
 
 	DTPrintf("%d voted back to %d with reply %v\n", rf.me, args.CandidateId, reply)
-	resCh <- resourceRes{reset: reply.VoteGranted, kind: RES_VOTE}
+	resCh <- resp
 }
 
 type AppendEntriesArgs struct {
@@ -250,45 +240,34 @@ func min(a int, b int) int {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	var resCh chan resourceRes
-	resCh = <-rf.resourceCh
+	var resCh chan rpcResp
+	resCh = <-rf.rpcCh
 	rf.persist()
 
-	//DTPrintf("%d received Append RPC req for term %d. Its term is %d, commit is %d, log len is %d\n",
-	//rf.me, args.Term, rf.state.CurrentTerm, rf.state.commitIndex, len(rf.state.Log))
-
-	role := rf.state.getRole()
 	curTerm := rf.state.getCurrentTerm()
 	switch {
 	case args.Term > curTerm:
 		curTerm = args.Term
 		rf.state.setCurrentTerm(curTerm)
-		switch {
-		case role == CANDIDATE:
-			DTPrintf("%d switched to follower\n", rf.me)
-		case role == LEADER:
-			DTPrintf("%d switched to follower\n", rf.me)
-		case role == FOLLOWER:
-			DTPrintf("%d update its follower term\n", rf.me)
-		}
-		role = FOLLOWER
-		rf.state.setRole(role)
+		rf.state.setRole(FOLLOWER)
 	case args.Term < curTerm:
 		reply.Term = curTerm
 		reply.Success = false
-		DTPrintf("%d received reset from stale leader\n", rf.me)
+		//DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
 		// Did not receive RPC from *current* leader
-		resCh <- resourceRes{reset: false, kind: RES_APPEND}
+		resCh <- rpcResp{toFollower: false}
 		return
 	}
 
-	if role == LEADER {
-		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n", args.Term, rf.me)
+	if rf.state.getRole() == LEADER {
+		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n",
+			args.Term, rf.me)
 		log.Fatal("In AppendEntriesReply Dead!")
 	}
 
 	reply.Term = curTerm
 
+	rf.state.setRole(FOLLOWER)
 	logLen := rf.state.getLogLen()
 
 	switch {
@@ -324,9 +303,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					deleteIndex++
 				}
 			}
-			DTPrintf("%d Append RPC done Success: %t for term %d, the c_index is %d, c_term is %d\n",
-				rf.me, reply.Success, args.Term, reply.ConflictIndex, reply.ConflictTerm)
-			DTPrintf("%d: loglen: %d\n", rf.me, rf.state.getLogLen())
 		}
 		if args.LeaderCommit > rf.state.getCommitIndex() {
 			rf.state.setCommitIndex(min(args.LeaderCommit, logLen-1))
@@ -334,7 +310,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	resCh <- resourceRes{reset: true, kind: RES_APPEND}
+	resCh <- rpcResp{toFollower: true}
 }
 
 func (rf *Raft) commitLoop() {
@@ -343,7 +319,8 @@ func (rf *Raft) commitLoop() {
 		case <-rf.commit:
 			commitIndex := rf.state.getCommitIndex()
 			lastApplied := rf.state.getLastApplied()
-			DTPrintf("%d: try to apply with commitIndex: %d, lastApplied: %d\n", rf.me, commitIndex, lastApplied)
+			DTPrintf("%d: try to apply with commitIndex: %d, lastApplied: %d\n",
+				rf.me, commitIndex, lastApplied)
 			for commitIndex > lastApplied {
 				lastApplied++
 				rf.state.setLastApplied(lastApplied)
@@ -402,32 +379,13 @@ func (rf *Raft) Kill() {
 // Long time main running goroutine
 func (rf *Raft) run() {
 	for {
-		switch role := rf.state.getRole(); {
-		case role == FOLLOWER:
+		switch role := rf.state.getRole(); role {
+		case FOLLOWER:
 			rf.runFollower()
-		case role == CANDIDATE:
-			rf.loop()
-		case role == LEADER:
+		case CANDIDATE:
+			rf.runCandidate()
+		case LEADER:
 			rf.runLeader()
-		}
-	}
-}
-
-func (rf *Raft) loop() {
-	var resCh chan resourceRes
-	for {
-		if resCh == nil {
-			resCh = make(chan resourceRes)
-		}
-		select {
-		case rf.resourceCh <- resCh:
-			// true is to reset
-			switch r := <-resCh; {
-			case r.kind == RES_VOTE && r.reset:
-				go func() { rf.electionProcess.start <- true }()
-			case r.kind == RES_APPEND && r.reset:
-				go func() { rf.electionProcess.start <- true }()
-			}
 		}
 	}
 }
@@ -464,8 +422,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state.setRole(FOLLOWER)
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
-	rf.resourceCh = make(chan chan resourceRes)
-	rf.electionProcess = &electionProcess{start: make(chan bool)}
+	rf.rpcCh = make(chan chan rpcResp)
 	rf.leaderProcess = &leaderProcess{start: make(chan bool), newEntry: make(chan int)}
 
 	rf.commit = make(chan bool)
@@ -473,9 +430,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.run()
 	go rf.commitLoop()
-	go func() {
-		rf.electionProcess.start <- true
-	}()
 	DTPrintf("%d is created\n", rf.me)
 
 	return rf
