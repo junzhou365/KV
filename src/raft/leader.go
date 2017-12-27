@@ -15,6 +15,8 @@ func (rf *Raft) runLeader() {
 	rf.state.matchIndexes = make([]int, len(rf.peers))
 	rf.state.rw.Unlock()
 
+	term := rf.state.getCurrentTerm()
+
 	heartbeatTimer := time.After(0)
 	var heartbeatReplyCh chan AppendEntriesReply
 	var appendReplyCh chan AppendEntriesReply
@@ -22,6 +24,7 @@ func (rf *Raft) runLeader() {
 	last_seen_nei := 0
 
 	respCh := make(chan rpcResp)
+	appended := 1
 
 	for {
 		select {
@@ -36,7 +39,7 @@ func (rf *Raft) runLeader() {
 			heartbeatReplyCh = rf.sendHeartbeat()
 
 		case r := <-heartbeatReplyCh:
-			if r.Term > rf.state.getCurrentTerm() {
+			if r.Term > term {
 				rf.state.setRole(FOLLOWER)
 				rf.state.setCurrentTerm(r.Term)
 				DTPrintf("%d discovered new leader for term %d, switch to follower",
@@ -44,66 +47,50 @@ func (rf *Raft) runLeader() {
 				return
 			}
 
-		case nei := <-rf.leaderProcess.newEntry:
+		case nei := <-rf.newEntry:
 			if nei > last_seen_nei {
 				DTPrintf("%d: newEntry at %d\n", rf.me, nei)
 				appendReplyCh = make(chan AppendEntriesReply)
-				go rf.appendNewEntries(appendReplyCh)
+				appended = 1
+				go rf.appendNewEntries(term, appendReplyCh)
 				last_seen_nei = nei
 			}
 
 		case reply := <-appendReplyCh:
-			appendReplyCh = nil
-			if !reply.Success {
+			if !reply.Success && reply.Term > term {
 				rf.state.setCurrentTerm(reply.Term)
 				rf.state.setRole(FOLLOWER)
 				DTPrintf("%d discovered new leader for term %d, switch to follower",
 					rf.me, reply.Term)
-				heartbeatTimer = nil
 				return
-			} else {
-				DTPrintf("%d updated its commitIndex\n", rf.me)
+			}
+			appended++
+			if appended > len(rf.peers)/2 {
+				rf.updateNextAndMatchIndexes(term)
 			}
 		}
 	}
 }
-
-//
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-//
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+func (rf *Raft) updateNextAndMatchIndexes(term int) {
+	rf.state.rw.RLock()
+	count := 1
+	for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
+		for j := 0; j < len(rf.peers); j++ {
+			if j != rf.me && rf.state.matchIndexes[j] >= n {
+				count++
+			}
+		}
+		if count > len(rf.peers)/2 && n > 0 && term == rf.state.Log[n].Term {
+			rf.state.commitIndex = n
+			go func() { rf.commit <- true }()
+			break
+		}
+	}
+	rf.state.rw.RUnlock()
 }
 
 // Should run in order
-func (rf *Raft) appendNewEntries(appendReplyCh chan AppendEntriesReply) {
+func (rf *Raft) appendNewEntries(term int, appendReplyCh chan AppendEntriesReply) {
 	var llog []RaftLogEntry
 	var localNextIndexes []int
 	rf.state.rw.RLock()
@@ -111,33 +98,25 @@ func (rf *Raft) appendNewEntries(appendReplyCh chan AppendEntriesReply) {
 	localNextIndexes = append(localNextIndexes, rf.state.nextIndexes...)
 	rf.state.rw.RUnlock()
 	DTPrintf("%d: starts sending Append RPCs.\nCurrent log len is %d\n", rf.me, len(llog))
-	curTerm := rf.state.getCurrentTerm()
-	role := rf.state.getRole()
 	leaderCommit := rf.state.getCommitIndex()
 
-	if role != LEADER {
-		return
-	}
-
-	replyCh := make(chan AppendEntriesReply)
-
 	sendAppend := func(i int, next int) {
-		for rf.state.getCurrentTerm() == curTerm {
+		for rf.state.getCurrentTerm() == term {
 			args := AppendEntriesArgs{}
-			args.Term = curTerm
+			args.Term = term
 			args.PrevLogIndex = next - 1
 			args.PrevLogTerm = llog[args.PrevLogIndex].Term
 			args.Entries = llog[next:]
 			args.LeaderCommit = leaderCommit
 
 			reply := new(AppendEntriesReply)
-			DTPrintf("%d sends Append RPC to %d for term %d\n", rf.me, i, curTerm)
+			DTPrintf("%d sends Append RPC to %d for term %d\n", rf.me, i, term)
 			for ok := false; !ok; {
 				ok = rf.peers[i].Call("Raft.AppendEntries", &args, reply)
 			}
 			switch {
-			case !reply.Success && reply.Term > curTerm:
-				replyCh <- *reply
+			case !reply.Success && reply.Term > term:
+				appendReplyCh <- *reply
 				return
 			case !reply.Success && reply.ConflictTerm == -1:
 				// Follower doesn't have the entry with that term. len of
@@ -159,15 +138,16 @@ func (rf *Raft) appendNewEntries(appendReplyCh chan AppendEntriesReply) {
 				rf.state.setNextIndex(i, next+len(args.Entries))
 				rf.state.setMatchIndex(i, args.PrevLogIndex+len(args.Entries))
 				reply.index = i
-				DTPrintf("%d: got Append RPC from %d for term %d\n", rf.me, i, curTerm)
-				replyCh <- *reply
+				DTPrintf("%d: got Append RPC from %d for term %d\n", rf.me, i, term)
+				appendReplyCh <- *reply
 				return
 			default:
-				DTPrintf("!!! reply: %v, term: %d\n", reply, curTerm)
+				DTPrintf("!!! reply: %v, term: %d\n", reply, term)
 				log.Fatal("!!! Incorrect Append RPC reply")
 			}
 		}
 	}
+
 	for i, next := range localNextIndexes {
 		if next > len(llog)-1 {
 			DTPrintf("%d: follower %d's next %d than last log index\n", rf.me, i, next)
@@ -182,41 +162,6 @@ func (rf *Raft) appendNewEntries(appendReplyCh chan AppendEntriesReply) {
 		go sendAppend(i, next)
 	}
 
-	received := 1
-	for i := 0; i < len(rf.peers)-1; i++ {
-		r := <-replyCh
-		if !r.Success {
-			appendReplyCh <- r
-			return
-		}
-
-		received++
-		if received <= len(rf.peers)/2 {
-			continue
-		}
-
-		count := 1
-
-		rf.state.rw.RLock()
-		for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
-			//DTPrintf("%d: try to find n. matches: %v, n: %d, commit: %d\n",
-			//rf.me, rf.state.matchIndexes, n, rf.state.commitIndex)
-			for j := 0; j < len(rf.peers); j++ {
-				if j != rf.me && rf.state.matchIndexes[j] >= n {
-					count++
-				}
-			}
-			if count > len(rf.peers)/2 && n > 0 && curTerm == rf.state.Log[n].Term {
-				DTPrintf("%d: commitIndex %d is updated to %d\n", rf.me, rf.state.commitIndex, n)
-				rf.state.commitIndex = n
-				go func() { rf.commit <- true }()
-				break
-			}
-		}
-		rf.state.rw.RUnlock()
-	}
-
-	appendReplyCh <- AppendEntriesReply{Term: curTerm, Success: true}
 }
 
 func (rf *Raft) sendHeartbeat() chan AppendEntriesReply {

@@ -53,10 +53,10 @@ type Raft struct {
 	// state a Raft server must maintain.
 	state             RaftState
 	rpcCh             chan chan rpcResp
-	leaderProcess     *leaderProcess
 	heartbeatInterval time.Duration
 	commit            chan bool
 	applyCh           chan ApplyMsg
+	newEntry          chan int
 }
 
 type rpcResp struct {
@@ -67,11 +67,6 @@ const (
 	RES_VOTE = iota
 	RES_APPEND
 )
-
-type leaderProcess struct {
-	start    chan bool
-	newEntry chan int
-}
 
 const (
 	FOLLOWER = iota
@@ -359,7 +354,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		DTPrintf("%d: Start is called with command %v\n", rf.me, command)
 		rf.state.appendLogEntry(RaftLogEntry{Term: term, Command: command})
 		index = rf.state.getLogLen() - 1
-		go func() { rf.leaderProcess.newEntry <- index }()
+		go func() { rf.newEntry <- index }()
 		DTPrintf("%d: Start call on leader with command %v finished\n", rf.me, command)
 	}
 
@@ -423,7 +418,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
 	rf.rpcCh = make(chan chan rpcResp)
-	rf.leaderProcess = &leaderProcess{start: make(chan bool), newEntry: make(chan int)}
+	rf.newEntry = make(chan int)
 
 	rf.commit = make(chan bool)
 	rf.applyCh = applyCh
