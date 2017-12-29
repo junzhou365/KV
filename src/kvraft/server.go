@@ -32,6 +32,7 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	state KVState
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
