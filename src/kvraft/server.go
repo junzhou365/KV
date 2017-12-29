@@ -3,15 +3,24 @@ package raftkv
 import (
 	"encoding/gob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
+)
+
+const (
+	OP_GET = iota
+	OP_PUT
+	OP_APPEND
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Seq   uint // for de-duplicate reqs
+	Type  int
+	Key   string
+	Value string
 }
 
 type RaftKV struct {
