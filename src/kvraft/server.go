@@ -8,16 +8,6 @@ import (
 	"sync"
 )
 
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -34,7 +24,6 @@ type RaftKV struct {
 
 	// Your definitions here.
 }
-
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
