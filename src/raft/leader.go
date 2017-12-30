@@ -65,7 +65,7 @@ func (rf *Raft) runLeader() {
 	}
 }
 func (rf *Raft) updateCommitIndex(term int) {
-	rf.state.rw.RLock()
+	rf.state.rw.Lock()
 	count := 1
 	for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
 		for j := 0; j < len(rf.peers); j++ {
@@ -79,7 +79,7 @@ func (rf *Raft) updateCommitIndex(term int) {
 			break
 		}
 	}
-	rf.state.rw.RUnlock()
+	rf.state.rw.Unlock()
 }
 
 // Should run in order
