@@ -9,7 +9,7 @@ type Err string
 
 type ReqState struct {
 	Seq uint
-	ID  int
+	Id  int
 }
 
 // Put or Append
