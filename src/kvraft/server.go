@@ -7,12 +7,6 @@ import (
 	"sync"
 )
 
-const (
-	OP_GET = iota
-	OP_PUT
-	OP_APPEND
-)
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,

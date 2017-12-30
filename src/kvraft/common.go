@@ -7,6 +7,12 @@ const (
 
 type Err string
 
+const (
+	OP_GET = iota
+	OP_PUT
+	OP_APPEND
+)
+
 type ReqState struct {
 	Seq uint
 	Id  int

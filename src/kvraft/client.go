@@ -40,6 +40,40 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	return ck
 }
 
+func (ck *Clerk) sendRequst(args interface{}) string {
+	var ret string
+	var wrongLeader bool
+	for {
+		for i := 0; i < len(ck.servers); i++ {
+		RETRY:
+			for ok := false; ; {
+				switch args.(type) {
+				case *GetArgs:
+					reply := GetReply{}
+					ok = ck.servers[i].Call("RaftKV.Get", args, &reply)
+					ret = reply.Value
+					wrongLeader = reply.WrongLeader
+				case *PutAppendArgs:
+					reply := PutAppendReply{}
+					ok = ck.servers[i].Call("RaftKV.PutAppend", args, &reply)
+					wrongLeader = reply.WrongLeader
+				}
+
+				switch {
+				case !ok:
+					continue
+
+				case wrongLeader:
+					break RETRY
+				}
+
+				ck.increaseSeq()
+				return ret
+			}
+		}
+	}
+}
+
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -59,27 +93,8 @@ func (ck *Clerk) Get(key string) string {
 		Key:   key,
 		State: ReqState{Seq: ck.getSeq(), Id: ck.uid}}
 
-	for {
-		for i := 0; i < len(ck.servers); i++ {
-		RETRY:
-			for ok := false; ; {
-				reply := GetReply{}
-				ok = ck.servers[i].Call("RaftKV.Get", &args, &reply)
-
-				switch {
-				case !ok:
-					continue
-
-				case reply.WrongLeader:
-					break RETRY
-				}
-
-				ck.increaseSeq()
-				return reply.Value
-			}
-		}
-	}
-	return ""
+	ret := ck.sendRequst(&args)
+	return ret
 }
 
 //
@@ -101,25 +116,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		Op:    op,
 		State: ReqState{Seq: ck.getSeq(), Id: ck.uid}}
 
-	for {
-		for i := 0; i < len(ck.servers); i++ {
-		RETRY:
-			for ok := false; ; {
-				reply := PutAppendReply{}
-				ok = ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
-
-				switch {
-				case !ok:
-					continue
-				case reply.WrongLeader:
-					break RETRY
-				}
-
-				ck.increaseSeq()
-				return
-			}
-		}
-	}
+	ck.sendRequst(&args)
 }
 
 func (ck *Clerk) Put(key string, value string) {
