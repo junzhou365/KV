@@ -85,6 +85,7 @@ func (kv *RaftKV) commitOperation(op Op) (Op, bool) {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	DTPrintf("%d: Get, args: %+v\n", kv.me, args)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
@@ -95,15 +96,19 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		Key:      args.Key}
 
 	resOp, wrongLeader := kv.commitOperation(op)
+	DTPrintf("%d: Get, resOp: %+v\n", kv.me, resOp)
 	if wrongLeader {
 		reply.WrongLeader = true
 	} else {
 		reply.Value = resOp.Value
 	}
+
+	DTPrintf("%d: Get, reply: %+v\n", kv.me, reply)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DTPrintf("%d: Server PutAppend, args: %+v\n", kv.me, args)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
@@ -116,12 +121,14 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Seq:      args.State.Seq,
 		Type:     opType,
 		ClientId: args.State.Id,
-		Key:      args.Key}
+		Key:      args.Key,
+		Value:    args.Value}
 
 	_, wrongLeader := kv.commitOperation(op)
 	if wrongLeader {
 		reply.WrongLeader = true
 	}
+	DTPrintf("%d: PutAppend, reply: %+v\n", kv.me, reply)
 }
 
 //
@@ -158,7 +165,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.state = KVState{}
+	kv.state = KVState{
+		table:      make(map[string]string),
+		duplicates: make(map[int]Op)}
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
