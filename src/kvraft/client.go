@@ -4,13 +4,15 @@ import "labrpc"
 import "crypto/rand"
 import "math/big"
 import "sync"
+import "time"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	seq uint
-	uid int
-	rw  sync.RWMutex
+	rw         sync.RWMutex
+	seq        uint
+	uid        int
+	lastServer int
 }
 
 func (ck *Clerk) increaseSeq() {
@@ -25,6 +27,18 @@ func (ck *Clerk) getSeq() uint {
 	return ck.seq
 }
 
+func (ck *Clerk) setLastServer(i int) {
+	ck.rw.Lock()
+	defer ck.rw.Unlock()
+	ck.lastServer = i
+}
+
+func (ck *Clerk) getLastServer() int {
+	ck.rw.RLock()
+	defer ck.rw.RUnlock()
+	return ck.lastServer
+}
+
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
@@ -37,41 +51,88 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.uid = int(nrand())
+	ck.setLastServer(-1)
 	return ck
 }
 
+type ReqRes struct {
+	ok          bool
+	wrongLeader bool
+	value       string
+	server      int
+}
+
 func (ck *Clerk) sendRequst(args interface{}) string {
-	var ret string
-	var wrongLeader bool
-	for {
-		for i := 0; i < len(ck.servers); i++ {
-		RETRY:
-			for ok := false; ; {
-				switch args.(type) {
-				case *GetArgs:
-					reply := GetReply{}
-					ok = ck.servers[i].Call("RaftKV.Get", args, &reply)
-					ret = reply.Value
-					wrongLeader = reply.WrongLeader
-				case *PutAppendArgs:
-					reply := PutAppendReply{}
-					ok = ck.servers[i].Call("RaftKV.PutAppend", args, &reply)
-					wrongLeader = reply.WrongLeader
-				}
 
-				switch {
-				case !ok:
-					continue
+	resCh := make(chan ReqRes)
+	done := make(chan interface{})
+	defer close(done)
 
-				case wrongLeader:
-					break RETRY
-				}
+	sendReqTo := func(server int) {
 
-				ck.increaseSeq()
-				return ret
-			}
+		res := ReqRes{server: server}
+
+		switch args.(type) {
+		case *GetArgs:
+			reply := GetReply{}
+			res.ok = ck.servers[server].Call("RaftKV.Get", args, &reply)
+			res.value = reply.Value
+			res.wrongLeader = reply.WrongLeader
+
+		case *PutAppendArgs:
+			reply := PutAppendReply{}
+			res.ok = ck.servers[server].Call("RaftKV.PutAppend", args, &reply)
+			res.wrongLeader = reply.WrongLeader
+		}
+
+		select {
+		case resCh <- res:
+		case <-done:
 		}
 	}
+
+	serverToSendIndexes := func() <-chan int {
+		serverStream := make(chan int)
+		go func() {
+			defer close(serverStream)
+			if ls := ck.getLastServer(); ls != -1 {
+				serverStream <- ls
+			} else {
+				for i := 0; i < len(ck.servers); i++ {
+					serverStream <- i
+				}
+			}
+		}()
+
+		return serverStream
+	}
+
+	for {
+		sent := 0
+		for i := range serverToSendIndexes() {
+			go sendReqTo(i)
+			sent++
+		}
+
+		// process responses
+		for res := range resCh {
+			if res.ok && !res.wrongLeader {
+				ck.setLastServer(res.server)
+				ck.increaseSeq()
+				return res.value
+			} else {
+				ck.setLastServer(-1)
+			}
+
+			if sent--; sent == 0 {
+				break
+			}
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	return ""
 }
 
 //
