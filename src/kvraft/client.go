@@ -149,7 +149,7 @@ func (ck *Clerk) sendRequst(args interface{}) string {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	DTPrintf("Client Get, key: %s, value: %s, op: %s\n", key)
+	DTPrintf("Client [Get], key: %s\n", key)
 	args := GetArgs{
 		Key:   key,
 		State: ReqState{Seq: ck.getSeq(), Id: ck.uid}}
@@ -170,7 +170,7 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	DTPrintf("Client PutAppend, key: %s, value: %s, op: %s\n", key, value, op)
+	DTPrintf("Client [PutAppend], key: %s, value: %s, op: %s\n", key, value, op)
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,

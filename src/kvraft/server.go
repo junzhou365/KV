@@ -3,6 +3,7 @@ package raftkv
 import (
 	"encoding/gob"
 	"labrpc"
+	"log"
 	"raft"
 	"sync"
 )
@@ -18,6 +19,11 @@ type Op struct {
 	ClientId int
 }
 
+type Request struct {
+	resCh chan interface{}
+	index int
+}
+
 type RaftKV struct {
 	mu      sync.Mutex
 	me      int
@@ -27,61 +33,103 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	state          KVState
-	notifyLeaderCh chan Op
+	state       KVState
+	queue       chan *Request
+	notifyCh    chan raft.ApplyMsg
+	maxRequests int
+}
+
+func (kv *RaftKV) serve() {
+	for msg := range kv.msgStream() {
+		select {
+		case req := <-kv.queue:
+			index := msg.Index
+			DTPrintf("%d: new req %+v, msg is %+v\n", kv.me, req, msg)
+
+			// Leader role was lost
+			switch {
+			case req.index > index:
+				DTPrintf("%d: drain the index %d\n", kv.me, req.index)
+				req.resCh <- nil
+			case req.index == index:
+				req.resCh <- msg.Command
+			default:
+				// unsynced req
+				DTPrintf("%d: req.index %d < msg.index %d\n", kv.me, req.index, index)
+				log.Fatal("req.index < index")
+			}
+		default:
+			DTPrintf("%d: drain the msg %d\n", kv.me, msg.Index)
+		}
+	}
 }
 
 // long-time running loop for server applying commands received from Raft
-func (kv *RaftKV) appliedLoop() {
-	for {
-		// wait for the op to be committed
-		// XXX: might wait forever, or get nil
-		msg := <-kv.applyCh
-		op := msg.Command.(Op)
+func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
+	msgStream := make(chan raft.ApplyMsg)
 
-		if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
+	go func() {
+		defer close(msgStream)
+		for msg := range kv.applyCh {
+			op := msg.Command.(Op)
+			DTPrintf("%d: new msg. msg.Index: %d\n", kv.me, msg.Index)
+
 			// Duplicate Op
-			if _, isLeader := kv.rf.GetState(); isLeader {
-				kv.notifyLeaderCh <- resOp
+			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
+				DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
+				msg.Command = resOp
+				msgStream <- msg
+				continue
 			}
-			continue
-		}
 
-		switch op.Type {
-		case OP_GET:
-			// nonexistent value is ok
-			value, _ := kv.state.getValue(op.Key)
-			op.Value = value
-		case OP_PUT:
-			kv.state.setValue(op.Key, op.Value)
-		case OP_APPEND:
-			kv.state.appendValue(op.Key, op.Value)
-		}
+			switch op.Type {
+			case OP_GET:
+				// nonexistent value is ok
+				value, _ := kv.state.getValue(op.Key)
+				op.Value = value
+			case OP_PUT:
+				kv.state.setValue(op.Key, op.Value)
+			case OP_APPEND:
+				kv.state.appendValue(op.Key, op.Value)
+			}
 
-		kv.state.setDup(op.ClientId, op)
-		if _, isLeader := kv.rf.GetState(); isLeader {
-			kv.notifyLeaderCh <- op
+			kv.state.setDup(op.ClientId, op)
+			msg.Command = op
+			DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
+			msgStream <- msg
 		}
-	}
+	}()
+
+	return msgStream
 }
 
 // invoke the agreement on operation.
 // return applied Op and WrongLeader
-func (kv *RaftKV) commitOperation(op Op) (Op, bool) {
-	_, _, isLeader := kv.rf.Start(op)
+func (kv *RaftKV) commitOperation(op Op) interface{} {
+	// The Start() and putting req to the queue must be done atomically
+	kv.mu.Lock()
+	index, _, isLeader := kv.rf.Start(op)
+
 	if !isLeader {
-		return Op{}, true
+		kv.mu.Unlock()
+		return true
 	}
 
-	resOp := <-kv.notifyLeaderCh
-	return resOp, false
+	req := &Request{resCh: make(chan interface{}), index: index}
+	kv.queue <- req
+	kv.mu.Unlock()
+
+	cmd := <-req.resCh
+	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
+	if cmd == nil {
+		return "Leader role lost"
+	}
+	return cmd
 }
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	DTPrintf("%d: Get, args: %+v\n", kv.me, args)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	DTPrintf("%d: Server [Get], args: %+v\n", kv.me, args)
 
 	op := Op{
 		Seq:      args.State.Seq,
@@ -89,22 +137,23 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		ClientId: args.State.Id,
 		Key:      args.Key}
 
-	resOp, wrongLeader := kv.commitOperation(op)
-	DTPrintf("%d: Get, resOp: %+v\n", kv.me, resOp)
-	if wrongLeader {
+	ret := kv.commitOperation(op)
+
+	switch ret.(type) {
+	case bool:
 		reply.WrongLeader = true
-	} else {
-		reply.Value = resOp.Value
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		reply.Value = ret.(Op).Value
 	}
 
-	DTPrintf("%d: Get, reply: %+v\n", kv.me, reply)
+	DTPrintf("%d: Server [Get], for key %s, reply: %+v\n", kv.me, args.Key, reply)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	DTPrintf("%d: Server PutAppend, args: %+v\n", kv.me, args)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	DTPrintf("%d: Server [PutAppend], args: %+v\n", kv.me, args)
 
 	opType := OP_PUT
 	if args.Op == "Append" {
@@ -118,11 +167,15 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Key:      args.Key,
 		Value:    args.Value}
 
-	_, wrongLeader := kv.commitOperation(op)
-	if wrongLeader {
+	ret := kv.commitOperation(op)
+	switch ret.(type) {
+	case bool:
 		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
 	}
-	DTPrintf("%d: PutAppend, reply: %+v\n", kv.me, reply)
+
+	DTPrintf("%d: Server [PutAppend], reply: %+v\n", kv.me, reply)
 }
 
 //
@@ -165,10 +218,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.notifyCh = make(chan raft.ApplyMsg)
+	kv.maxRequests = 1000
+	kv.queue = make(chan *Request, kv.maxRequests)
 
 	// You may need initialization code here.
-	kv.notifyLeaderCh = make(chan Op)
-	go kv.appliedLoop()
+	go kv.serve()
+
+	DTPrintf("%d: is created\n", kv.me)
 
 	return kv
 }
