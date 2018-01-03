@@ -18,12 +18,15 @@ func (rf *Raft) runLeader() {
 	term := rf.state.getCurrentTerm()
 
 	heartbeatTimer := time.After(0)
-	var heartbeatReplyCh chan AppendEntriesReply
-	var appendReplyCh chan AppendEntriesReply
+	var heartbeatReplyCh <-chan AppendEntriesReply
+	var appendReplyCh <-chan AppendEntriesReply
 	last_seen_index := 0
 
 	respCh := make(chan rpcResp)
 	appended := 1
+
+	done := make(chan interface{})
+	defer close(done)
 
 	for {
 		select {
@@ -34,7 +37,7 @@ func (rf *Raft) runLeader() {
 
 		case <-heartbeatTimer:
 			heartbeatTimer = time.After(rf.heartbeatInterval)
-			heartbeatReplyCh = rf.sendHeartbeat()
+			heartbeatReplyCh = rf.sendHeartbeat(done, term)
 
 		case r := <-heartbeatReplyCh:
 			if r.Term > term {
@@ -45,9 +48,8 @@ func (rf *Raft) runLeader() {
 
 		case index := <-rf.newEntry:
 			if index > last_seen_index {
-				appendReplyCh = make(chan AppendEntriesReply)
 				appended = 1
-				go rf.appendNewEntries(term, index, appendReplyCh)
+				appendReplyCh = rf.appendNewEntries(done, term, index)
 				last_seen_index = index
 			}
 
@@ -84,8 +86,12 @@ func (rf *Raft) updateCommitIndex(term int) {
 
 // Should run in order
 func (rf *Raft) appendNewEntries(
-	term int, new_index int, appendReplyCh chan AppendEntriesReply) {
+	done <-chan interface{}, term int, new_index int) <-chan AppendEntriesReply {
 
+	// save before a change
+	rf.persist()
+
+	appendReplyCh := make(chan AppendEntriesReply)
 	sendAppend := func(i int, next int) {
 		for {
 			args := AppendEntriesArgs{}
@@ -102,17 +108,23 @@ func (rf *Raft) appendNewEntries(
 				rf.me, i, term, args.PrevLogIndex, args.PrevLogTerm)
 
 			ok := rf.peers[i].Call("Raft.AppendEntries", &args, reply)
-			switch {
-			// term changed
-			case term != rf.state.getCurrentTerm():
-				return
 
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			switch {
 			// Retry. Failed reply makes other cases meaningless
 			case !ok:
 				continue
 
 			case !reply.Success && reply.Term > term:
-				appendReplyCh <- *reply
+				select {
+				case appendReplyCh <- *reply:
+				case <-done:
+				}
 				return
 
 			case !reply.Success && reply.ConflictTerm == -1:
@@ -134,7 +146,10 @@ func (rf *Raft) appendNewEntries(
 				rf.state.setMatchIndex(i, args.PrevLogIndex+len(args.Entries))
 				reply.index = i
 				DTPrintf("%d: got Append RPC from %d for term %d\n", rf.me, i, term)
-				appendReplyCh <- *reply
+				select {
+				case appendReplyCh <- *reply:
+				case <-done:
+				}
 				return
 
 			default:
@@ -153,16 +168,16 @@ func (rf *Raft) appendNewEntries(
 		}
 
 		if i == rf.me {
-			// Simulate that the server responds to its own RPC.
-			rf.persist()
 			continue
 		}
 		go sendAppend(i, next)
 	}
+
+	return appendReplyCh
 }
 
-func (rf *Raft) sendHeartbeat() chan AppendEntriesReply {
-	term := rf.state.getCurrentTerm()
+func (rf *Raft) sendHeartbeat(done <-chan interface{}, term int) <-chan AppendEntriesReply {
+	rf.persist()
 	leaderCommit := rf.state.getCommitIndex()
 	prevLogIndex := rf.state.getLogLen() - 1
 	prevLogTerm := rf.state.getLogEntry(prevLogIndex).Term
@@ -178,20 +193,27 @@ func (rf *Raft) sendHeartbeat() chan AppendEntriesReply {
 		args.LeaderCommit = leaderCommit
 		reply := AppendEntriesReply{}
 		// Retry indefinitely and do not send outdated request
-		for ok := false; !ok && term == rf.state.getCurrentTerm(); {
+		for ok := false; !ok; {
 			ok = rf.peers[i].Call("Raft.AppendEntries", &args, &reply)
+			select {
+			case <-done:
+				return
+			default:
+			}
 		}
-		heartbeatReplyCh <- reply
+
+		select {
+		case heartbeatReplyCh <- reply:
+		case <-done:
+		}
 	}
 
-	go func() {
-		for i, _ := range rf.peers {
-			if i == rf.me {
-				continue
-			}
-			go sendAppend(i)
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
 		}
-	}()
+		go sendAppend(i)
+	}
 
 	return heartbeatReplyCh
 }

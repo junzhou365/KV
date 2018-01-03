@@ -11,18 +11,22 @@ func (rf *Raft) runCandidate() {
 		log.Fatal("In runCandidate, Wrong Raft Role. Dead!!!")
 	}
 
+	done := make(chan interface{})
+	defer close(done)
+
 	term := rf.state.getCurrentTerm()
 	term++
 	rf.state.setCurrentTerm(term)
 	rf.state.setVotedFor(rf.me)
 
-	electionResCh := rf.elect(term)
+	electionResCh := rf.elect(done, term)
 
 	electionTimeoutTimer := time.After(getElectionTimeout())
 	DTPrintf("%d collects votes for term %d\n", rf.me, term)
 
 	respCh := make(chan rpcResp)
 	votes := 1
+
 	for {
 		select {
 		case rf.rpcCh <- respCh:
@@ -55,7 +59,7 @@ func (rf *Raft) runCandidate() {
 	}
 }
 
-func (rf *Raft) elect(term int) chan RequestVoteReply {
+func (rf *Raft) elect(done <-chan interface{}, term int) chan RequestVoteReply {
 	DTPrintf("<<<< Triggered, node: %d >>>>\n", rf.me)
 
 	args := new(RequestVoteArgs)
@@ -68,18 +72,25 @@ func (rf *Raft) elect(term int) chan RequestVoteReply {
 
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
-			// Simulate that the server responds to its own RPC.
-			rf.persist()
 			continue
 		}
+
 		go func(i int) {
 			DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
 			reply := RequestVoteReply{index: i}
-			for ok := false; !ok && term == rf.state.getCurrentTerm(); {
+			for ok := false; !ok; {
+				select {
+				case <-done:
+					return
+				default:
+				}
 				ok = rf.sendRequestVote(i, args, &reply)
 			}
 
-			replyCh <- reply
+			select {
+			case replyCh <- reply:
+			case <-done:
+			}
 		}(i)
 	}
 	return replyCh

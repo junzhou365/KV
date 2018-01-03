@@ -99,9 +99,11 @@ func (rf *Raft) persist() {
 	e := gob.NewEncoder(w)
 	e.Encode(rf.state.getCurrentTerm())
 	e.Encode(rf.state.getVotedFor())
+
 	rf.state.rw.RLock()
 	e.Encode(rf.state.Log)
 	rf.state.rw.RUnlock()
+
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -303,6 +305,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					rf.state.rw.Lock()
 					rf.state.Log = append(rf.state.Log[:deleteIndex],
 						args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
+					logLen = len(rf.state.Log)
 					rf.state.rw.Unlock()
 					break
 				default:
@@ -323,8 +326,6 @@ func (rf *Raft) commitLoop() {
 		case <-rf.commit:
 			commitIndex := rf.state.getCommitIndex()
 			lastApplied := rf.state.getLastApplied()
-			DTPrintf("%d: try to apply with commitIndex: %d, lastApplied: %d\n",
-				rf.me, commitIndex, lastApplied)
 			for commitIndex > lastApplied {
 				lastApplied++
 				rf.state.setLastApplied(lastApplied)
@@ -360,7 +361,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 	} else {
 		term = rf.state.getCurrentTerm()
-		DTPrintf("%d: Start is called with command %v\n", rf.me, command)
+		DTPrintf("%d: Start is called with command %+v\n", rf.me, command)
 		rf.state.appendLogEntry(RaftLogEntry{Term: term, Command: command})
 		index = rf.state.getLogLen() - 1
 		go func() { rf.newEntry <- index }()
