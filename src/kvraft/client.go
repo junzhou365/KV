@@ -60,6 +60,7 @@ type ReqRes struct {
 	wrongLeader bool
 	value       string
 	server      int
+	err         Err
 }
 
 func (ck *Clerk) sendRequst(args interface{}) string {
@@ -78,11 +79,13 @@ func (ck *Clerk) sendRequst(args interface{}) string {
 			res.ok = ck.servers[server].Call("RaftKV.Get", args, &reply)
 			res.value = reply.Value
 			res.wrongLeader = reply.WrongLeader
+			res.err = reply.Err
 
 		case *PutAppendArgs:
 			reply := PutAppendReply{}
 			res.ok = ck.servers[server].Call("RaftKV.PutAppend", args, &reply)
 			res.wrongLeader = reply.WrongLeader
+			res.err = reply.Err
 		}
 
 		select {
@@ -116,12 +119,12 @@ func (ck *Clerk) sendRequst(args interface{}) string {
 
 		// process responses
 		for res := range resCh {
-			if res.ok && !res.wrongLeader {
+			if !res.ok || string(res.err) == "Leader role lost" || res.wrongLeader {
+				ck.setLastServer(-1)
+			} else {
 				ck.setLastServer(res.server)
 				ck.increaseSeq()
 				return res.value
-			} else {
-				ck.setLastServer(-1)
 			}
 
 			if sent--; sent == 0 {
@@ -149,7 +152,7 @@ func (ck *Clerk) sendRequst(args interface{}) string {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
-	DTPrintf("Client [Get], key: %s\n", key)
+	DTPrintf("%d: Client [Get], key: %s\n", ck.uid, key)
 	args := GetArgs{
 		Key:   key,
 		State: ReqState{Seq: ck.getSeq(), Id: ck.uid}}
@@ -170,7 +173,8 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
-	DTPrintf("Client [PutAppend], key: %s, value: %s, op: %s\n", key, value, op)
+	DTPrintf("%d: Client [PutAppend], key: %s, value: %s, op: %s\n",
+		ck.uid, key, value, op)
 	args := PutAppendArgs{
 		Key:   key,
 		Value: value,

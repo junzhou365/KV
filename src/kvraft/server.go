@@ -22,6 +22,7 @@ type Op struct {
 type Request struct {
 	resCh chan interface{}
 	index int
+	term  int
 }
 
 type RaftKV struct {
@@ -47,8 +48,8 @@ func (kv *RaftKV) serve() {
 			DTPrintf("%d: new req %+v, msg is %+v\n", kv.me, req, msg)
 
 			// Leader role was lost
-			switch {
-			case req.index > index:
+			switch term, _ := kv.rf.GetState(); {
+			case term != req.term || req.index > index:
 				DTPrintf("%d: drain the index %d\n", kv.me, req.index)
 				req.resCh <- nil
 			case req.index == index:
@@ -108,21 +109,23 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 func (kv *RaftKV) commitOperation(op Op) interface{} {
 	// The Start() and putting req to the queue must be done atomically
 	kv.mu.Lock()
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
 		kv.mu.Unlock()
 		return true
 	}
 
-	req := &Request{resCh: make(chan interface{}), index: index}
+	DTPrintf("%d: Server handles op: %+v. The req index is %d\n",
+		kv.me, op, index)
+	req := &Request{resCh: make(chan interface{}), index: index, term: term}
 	kv.queue <- req
 	kv.mu.Unlock()
 
 	cmd := <-req.resCh
 	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
 	if cmd == nil {
-		return "Leader role lost"
+		return Err("Leader role lost")
 	}
 	return cmd
 }

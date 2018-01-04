@@ -114,6 +114,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 				}
 			}
 		}
+		DTESTPrintf("groups: %v and %v", pa[0], pa[1])
 		cfg.partition(pa[0], pa[1])
 		time.Sleep(electionTimeout + time.Duration(rand.Int63()%200)*time.Millisecond)
 	}
@@ -142,10 +143,12 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
+		DTESTPrintf("i: %d", i)
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
+			defer DTESTPrintf("spawn_clients_and_wait is done")
 			j := 0
 			defer func() {
 				clnts[cli] <- j
@@ -157,11 +160,13 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
+					DTESTPrintf("%d: Append k: %v, v: %v", cli, key, nv)
 					myck.Append(key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
+					DTESTPrintf("%d: get k: %v", cli, key)
 					v := myck.Get(key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
@@ -177,6 +182,8 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 		}
 		time.Sleep(5 * time.Second)
 
+		DTESTPrintf("FUCK em")
+
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
 
@@ -191,6 +198,8 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)
 		}
+
+		DTESTPrintf("FUCK him")
 
 		if crash {
 			// log.Printf("shutdown servers\n")
@@ -294,6 +303,7 @@ func TestOnePartition(t *testing.T) {
 	fmt.Printf("Test: Progress in majority ...\n")
 
 	p1, p2 := cfg.make_partition()
+	DTESTPrintf("partitioned two groups, %v and %v", p1, p2)
 	cfg.partition(p1, p2)
 
 	ckp1 := cfg.makeClient(p1)  // connect ckp1 to p1
@@ -337,6 +347,8 @@ func TestOnePartition(t *testing.T) {
 	cfg.ConnectAll()
 	cfg.ConnectClient(ckp2a, cfg.All())
 	cfg.ConnectClient(ckp2b, cfg.All())
+
+	DTESTPrintf("connect %d and %d", ckp2a.uid, ckp2b.uid)
 
 	time.Sleep(electionTimeout)
 
