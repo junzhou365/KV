@@ -282,10 +282,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
+
 	case rf.state.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm:
 		reply.Success = false
 		reply.ConflictTerm = rf.state.getLogEntry(args.PrevLogIndex).Term
 		rf.state.rw.RLock()
+		// find the first entry that has the conflicting term
 		for i, l := range rf.state.Log {
 			if l.Term == reply.ConflictTerm {
 				reply.ConflictIndex = i
@@ -293,31 +295,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		rf.state.rw.RUnlock()
+
 	default:
 		reply.Success = true
-		if len(args.Entries) > 0 {
-			deleteIndex := args.PrevLogIndex + 1
-			for _, entry := range args.Entries {
-				switch {
-				case deleteIndex == logLen ||
-					rf.state.getLogEntry(deleteIndex).Term != entry.Term:
-					// delete conflicted entries
-					rf.state.rw.Lock()
-					rf.state.Log = append(rf.state.Log[:deleteIndex],
-						args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
-					logLen = len(rf.state.Log)
-					rf.state.rw.Unlock()
-					break
-				default:
-					deleteIndex++
-				}
+		deleteIndex := args.PrevLogIndex + 1
+		for _, entry := range args.Entries {
+			switch {
+			case deleteIndex == logLen ||
+				rf.state.getLogEntry(deleteIndex).Term != entry.Term:
+				// delete conflicted entries
+				rf.state.rw.Lock()
+				rf.state.Log = append(rf.state.Log[:deleteIndex],
+					args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
+				rf.state.rw.Unlock()
+				break
+			default:
+				deleteIndex++
 			}
 		}
+
+		lastNewEntryIndex := args.PrevLogIndex + len(args.Entries)
 		if args.LeaderCommit > rf.state.getCommitIndex() {
-			rf.state.setCommitIndex(min(args.LeaderCommit, logLen-1))
+			rf.state.setCommitIndex(min(args.LeaderCommit, lastNewEntryIndex))
 			go func() { rf.commit <- true }()
 		}
 	}
+	DTPrintf("%d received Append for term %d from leader\n", rf.me, args.Term)
 }
 
 func (rf *Raft) commitLoop() {

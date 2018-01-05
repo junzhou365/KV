@@ -356,6 +356,10 @@ func TestBackup2B(t *testing.T) {
 
 	// put leader and one follower in a partition
 	leader1 := cfg.checkOneLeader()
+
+	DTESTPrintf("disconnect %d and %d and %d",
+		(leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
+
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
