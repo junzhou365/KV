@@ -48,7 +48,8 @@ func (rf *Raft) runCandidate() {
 
 			if votes > len(rf.peers)/2 {
 				rf.state.setRole(LEADER)
-				DTPrintf("======= %d become a LEADER for term %d\n", rf.me, term)
+				DTPrintf("======= %d become a LEADER for term %d, log len: %d\n",
+					rf.me, term, rf.state.getLogLen())
 				return
 			}
 

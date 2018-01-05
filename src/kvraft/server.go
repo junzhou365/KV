@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 type Op struct {
@@ -38,29 +39,47 @@ type RaftKV struct {
 	queue       chan *Request
 	notifyCh    chan raft.ApplyMsg
 	maxRequests int
+	interval    time.Duration
 }
 
 func (kv *RaftKV) serve() {
-	for msg := range kv.msgStream() {
+	msgStream := kv.msgStream()
+	for {
 		select {
-		case req := <-kv.queue:
-			index := msg.Index
-			DTPrintf("%d: new req %+v, msg is %+v\n", kv.me, req, msg)
+		case msg := <-msgStream:
+			select {
+			case req := <-kv.queue:
+				index := msg.Index
+				DTPrintf("%d: new req %+v, msg is %+v\n", kv.me, req, msg)
 
-			// Leader role was lost
-			switch term, _ := kv.rf.GetState(); {
-			case term != req.term || req.index > index:
-				DTPrintf("%d: drain the index %d\n", kv.me, req.index)
-				req.resCh <- nil
-			case req.index == index:
-				req.resCh <- msg.Command
+				// Leader role was lost
+				switch term, _ := kv.rf.GetState(); {
+				case term != req.term || req.index > index:
+					DTPrintf("%d: drain the index %d\n", kv.me, req.index)
+					req.resCh <- nil
+				case req.index == index:
+					req.resCh <- msg.Command
+				default:
+					// unsynced req
+					DTPrintf("%d: req.index %d < msg.index %d\n", kv.me, req.index, index)
+					log.Fatal("req.index < index")
+				}
 			default:
-				// unsynced req
-				DTPrintf("%d: req.index %d < msg.index %d\n", kv.me, req.index, index)
-				log.Fatal("req.index < index")
+				DTPrintf("%d: drain the msg %d\n", kv.me, msg.Index)
 			}
-		default:
-			DTPrintf("%d: drain the msg %d\n", kv.me, msg.Index)
+		case <-time.After(kv.interval):
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+			LOOP:
+				for {
+					select {
+					case req := <-kv.queue:
+						DTPrintf("%d: not leader, drain the index %d\n", kv.me, req.index)
+						req.resCh <- nil
+					default:
+						break LOOP
+					}
+				}
+			}
 		}
 	}
 }
@@ -223,6 +242,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.notifyCh = make(chan raft.ApplyMsg)
 	kv.maxRequests = 1000
+	kv.interval = 10 * time.Millisecond
 	kv.queue = make(chan *Request, kv.maxRequests)
 
 	// You may need initialization code here.

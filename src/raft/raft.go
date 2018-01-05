@@ -169,8 +169,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
+
 	resCh := <-rf.rpcCh
-	rf.persist()
 
 	curTerm := rf.state.getCurrentTerm()
 	curVotedFor := rf.state.getVotedFor()
@@ -242,9 +243,10 @@ func min(a int, b int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
+
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
-	rf.persist()
 
 	curTerm := rf.state.getCurrentTerm()
 	resp := rpcResp{toFollower: false}
@@ -438,7 +440,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.run()
 	go rf.commitLoop()
-	DTPrintf("%d is created\n", rf.me)
+	DTPrintf("%d is created, log len: %d\n", rf.me, rf.state.getLogLen())
 
 	return rf
 }

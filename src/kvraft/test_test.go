@@ -160,13 +160,13 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
-					DTESTPrintf("%d: Append k: %v, v: %v", cli, key, nv)
+					DTESTPrintf("%d: Append k: %v, v: %v, j: %d", cli, key, nv, j)
 					myck.Append(key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
-					DTESTPrintf("%d: get k: %v", cli, key)
+					DTESTPrintf("%d: get k: %v, j: %d", cli, key, j)
 					v := myck.Get(key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
@@ -181,8 +181,6 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
 		}
 		time.Sleep(5 * time.Second)
-
-		DTESTPrintf("FUCK em")
 
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
@@ -199,9 +197,8 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			time.Sleep(electionTimeout)
 		}
 
-		DTESTPrintf("FUCK him")
-
 		if crash {
+			DTESTPrintf("Try to shut down")
 			// log.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
@@ -209,12 +206,15 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
+			DTESTPrintf("All servers are shut down")
+			DTESTPrintf("Restart all")
 			// log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
+			DTESTPrintf("Restarted all")
 		}
 
 		// log.Printf("wait for clients\n")
@@ -226,6 +226,7 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			}
 			key := strconv.Itoa(i)
 			// log.Printf("Check %v for client %d\n", j, i)
+			DTESTPrintf("Check %d for client %d", j, i)
 			v := ck.Get(key)
 			checkClntAppends(t, i, v, j)
 		}
