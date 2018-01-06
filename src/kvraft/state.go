@@ -7,57 +7,46 @@ import (
 type KVState struct {
 	rw sync.RWMutex
 
-	table map[string]string
+	Table map[string]string
 
-	duplicates map[int]Op
+	Duplicates map[int]Op
 
 	liveRequests map[int]*Request
 
-	leaderTerm int // last seen leader's term
+	LastIncludedEntryIndex int
+	LastIncludedEntryTerm  int
 }
 
 func (k *KVState) getValue(key string) (string, bool) {
 	k.rw.RLock()
 	defer k.rw.RUnlock()
-	value, ok := k.table[key]
+	value, ok := k.Table[key]
 	return value, ok
 }
 
 func (k *KVState) setValue(key string, value string) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
-	k.table[key] = value
+	k.Table[key] = value
 }
 
 func (k *KVState) appendValue(key string, value string) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
-	k.table[key] = k.table[key] + value
+	k.Table[key] = k.Table[key] + value
 }
 
 func (k *KVState) getDup(id int) (Op, bool) {
 	k.rw.RLock()
 	defer k.rw.RUnlock()
-	op, ok := k.duplicates[id]
+	op, ok := k.Duplicates[id]
 	return op, ok
 }
 
 func (k *KVState) setDup(id int, op Op) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
-	k.duplicates[id] = op
-}
-
-func (k *KVState) getLeaderTerm() int {
-	k.rw.RLock()
-	defer k.rw.RUnlock()
-	return k.leaderTerm
-}
-
-func (k *KVState) setLeaderTerm(term int) {
-	k.rw.Lock()
-	defer k.rw.Unlock()
-	k.leaderTerm = term
+	k.Duplicates[id] = op
 }
 
 func (k *KVState) getRequest(i int) (*Request, bool) {
@@ -77,4 +66,28 @@ func (k *KVState) delRequest(i int) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
 	delete(k.liveRequests, i)
+}
+
+func (k *KVState) getLastIndex() int {
+	k.rw.RLock()
+	defer k.rw.RUnlock()
+	return k.LastIncludedEntryIndex
+}
+
+func (k *KVState) setLastIndex(lastIndex int) {
+	k.rw.Lock()
+	defer k.rw.Unlock()
+	k.LastIncludedEntryIndex = lastIndex
+}
+
+func (k *KVState) getLastTerm() int {
+	k.rw.RLock()
+	defer k.rw.RUnlock()
+	return k.LastIncludedEntryTerm
+}
+
+func (k *KVState) setLastTerm(lastTerm int) {
+	k.rw.Lock()
+	defer k.rw.Unlock()
+	k.LastIncludedEntryTerm = lastTerm
 }

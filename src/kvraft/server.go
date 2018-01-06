@@ -33,6 +33,8 @@ type RaftKV struct {
 	applyCh chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
+	stateDelta   int
 
 	// Your definitions here.
 	state       KVState
@@ -93,6 +95,13 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 		for msg := range kv.applyCh {
 			op := msg.Command.(Op)
 			DTPrintf("%d: new msg. msg.Index: %d\n", kv.me, msg.Index)
+
+			if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
+				kv.state.setLastIndex(msg.Index - 1)
+				kv.state.setLastTerm(kv.rf.GetLogEntryTerm(msg.Index - 1))
+				kv.takeSnapshot()
+				kv.rf.DiscardLogEntries(msg.Index)
+			}
 
 			// Duplicate Op
 			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
@@ -235,11 +244,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.state = KVState{
-		table:      make(map[string]string),
-		duplicates: make(map[int]Op)}
+		Table:      make(map[string]string),
+		Duplicates: make(map[int]Op)}
+
+	kv.persister = persister
+	kv.restoreSnapshot(persister.ReadSnapshot())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.stateDelta = 20
 	kv.notifyCh = make(chan raft.ApplyMsg)
 	kv.maxRequests = 1000
 	kv.interval = 10 * time.Millisecond
