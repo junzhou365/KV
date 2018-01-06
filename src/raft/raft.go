@@ -74,6 +74,17 @@ const (
 	LEADER
 )
 
+func (rf *Raft) DiscardLogEntries(newIndex int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.state.discardLogEnries(newIndex)
+}
+
+func (rf *Raft) GetLogEntryTerm(index int) int {
+	return rf.state.getLogEntryTerm(index)
+}
+
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -285,9 +296,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
 
-	case rf.state.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm:
+	case rf.state.getLogEntryTerm(args.PrevLogIndex) != args.PrevLogTerm:
 		reply.Success = false
-		reply.ConflictTerm = rf.state.getLogEntry(args.PrevLogIndex).Term
+		reply.ConflictTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
 		rf.state.rw.RLock()
 		// find the first entry that has the conflicting term
 		for i, l := range rf.state.Log {
@@ -304,7 +315,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		for _, entry := range args.Entries {
 			switch {
 			case deleteIndex == logLen ||
-				rf.state.getLogEntry(deleteIndex).Term != entry.Term:
+				rf.state.getLogEntryTerm(deleteIndex) != entry.Term:
 				// delete conflicted entries
 				rf.state.rw.Lock()
 				rf.state.Log = append(rf.state.Log[:deleteIndex],

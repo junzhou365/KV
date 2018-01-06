@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"log"
 	"sync"
 )
 
@@ -16,6 +17,9 @@ type RaftState struct {
 
 	nextIndexes  []int
 	matchIndexes []int
+
+	lastIncludedEntryIndex int
+	lastIncludedEntryTerm  int
 }
 
 type RaftLogEntry struct {
@@ -59,22 +63,48 @@ func (rs *RaftState) setRole(r int) {
 	rs.role = r
 }
 
+func (rs *RaftState) getLogEntryTerm(index int) int {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	offsettedLastIndex := index - rs.lastIncludedEntryIndex
+
+	switch {
+	case offsettedLastIndex < -1:
+		log.Fatal("Could not get last term")
+	case offsettedLastIndex == -1:
+		return rs.lastIncludedEntryTerm
+	}
+
+	return rs.Log[offsettedLastIndex].Term
+}
+
 func (rs *RaftState) getLogEntry(index int) RaftLogEntry {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.Log[index]
+	return rs.Log[index-rs.lastIncludedEntryIndex]
 }
 
 func (rs *RaftState) getLogLen() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return len(rs.Log)
+	return len(rs.Log) + rs.lastIncludedEntryIndex
 }
 
 func (rs *RaftState) appendLogEntry(entry RaftLogEntry) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 	rs.Log = append(rs.Log, entry)
+}
+
+func (rs *RaftState) discardLogEnries(newIndex int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
+	rs.lastIncludedEntryIndex = newIndex - 1
+	rs.lastIncludedEntryTerm = rs.Log[newIndex-1].Term
+	// Keep the nil head
+	rs.Log = append(rs.Log[0:1], rs.Log[newIndex:]...)
 }
 
 func (rs *RaftState) getCommitIndex() int {

@@ -63,7 +63,16 @@ func (rf *Raft) runLeader() {
 func (rf *Raft) updateCommitIndex(term int) {
 	rf.state.rw.Lock()
 	defer rf.state.rw.Unlock()
-	for n := len(rf.state.Log) - 1; n > rf.state.commitIndex; n-- {
+
+	getLogLen := func() int {
+		return len(rf.state.Log) + rf.state.lastIncludedEntryIndex
+	}
+
+	getLogEntryTerm := func(i int) int {
+		return rf.state.Log[i-rf.state.lastIncludedEntryIndex].Term
+	}
+
+	for n := getLogLen() - 1; n > rf.state.commitIndex; n-- {
 		count := 1
 		for j := 0; j < len(rf.peers); j++ {
 			if j != rf.me && rf.state.matchIndexes[j] >= n {
@@ -72,7 +81,7 @@ func (rf *Raft) updateCommitIndex(term int) {
 			}
 		}
 		DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		if count > len(rf.peers)/2 && n > 0 && term == rf.state.Log[n].Term {
+		if count > len(rf.peers)/2 && n > 0 && term == getLogEntryTerm(n) {
 			rf.state.commitIndex = n
 			go func() { rf.commit <- true }()
 			return
@@ -88,7 +97,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		args.Term = term
 		args.PrevLogIndex = next - 1
 		DTPrintf("%d: logLen: %d, prevLogIndex: %d\n", rf.me, rf.state.getLogLen(), next-1)
-		args.PrevLogTerm = rf.state.getLogEntry(args.PrevLogIndex).Term
+		args.PrevLogTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
 		args.LeaderCommit = rf.state.getCommitIndex()
 
 		if !heartbeat {
@@ -129,6 +138,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			j := new_index
 			// Find the last entry of the conflicting term. The conflicting
 			// server will delete all entries after this new next
+			// XXX: might need update
 			for ; j > 0; j-- {
 				if rf.state.getLogEntry(j).Term == reply.ConflictTerm {
 					break

@@ -67,7 +67,7 @@ func (rf *Raft) elect(done <-chan interface{}, term int) chan RequestVoteReply {
 	args.Term = term
 	args.CandidateId = rf.me
 	args.LastLogIndex = rf.state.getLogLen() - 1
-	args.LastLogTerm = rf.state.getLogEntry(args.LastLogIndex).Term
+	args.LastLogTerm = rf.state.getLogEntryTerm(args.LastLogIndex)
 
 	replyCh := make(chan RequestVoteReply)
 
