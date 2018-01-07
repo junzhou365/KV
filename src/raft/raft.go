@@ -336,6 +336,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DTPrintf("%d received Append for term %d from leader\n", rf.me, args.Term)
 }
 
+type InstallSnapshotArgs struct {
+	Term                   int
+	LastIncludedEntryIndex int
+	LastIncludedEntryTerm  int
+	Data                   []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(
+	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	var resCh chan rpcResp
+	resCh = <-rf.rpcCh
+
+	resp := rpcResp{toFollower: false}
+	if rf.state.getCurrentTerm() < args.Term {
+		rf.state.setCurrentTerm(args.Term)
+		rf.state.setRole(FOLLOWER)
+		resp.toFollower = true
+		resCh <- resp
+
+		reply.Term = args.Term
+		return
+	}
+
+	resCh <- resp
+
+	if rf.state.getLogLen()-1 >= args.LastIncludedEntryIndex &&
+		args.LastIncludedEntryTerm == rf.state.getLogEntryTerm(args.LastIncludedEntryIndex) {
+		rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data}
+		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
+		return
+	}
+
+	rf.state.discardLogEnries(rf.state.getLogLen() - 1)
+	// reply snapshot
+	rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
+
+}
+
 func (rf *Raft) commitLoop() {
 	for {
 		select {

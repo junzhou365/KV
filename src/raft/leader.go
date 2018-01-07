@@ -23,9 +23,9 @@ func (rf *Raft) runLeader() {
 
 	respCh := make(chan rpcResp)
 
-	done := make(chan interface{})
 	// cannot use defer close(done) here because the "done" will be bound to a
 	// future closed channel
+	done := make(chan interface{})
 
 	for {
 		select {
@@ -92,6 +92,29 @@ func (rf *Raft) updateCommitIndex(term int) {
 func (rf *Raft) sendAppend(done <-chan interface{},
 	appendReplyCh chan AppendEntriesReply, i int, heartbeat bool, term int,
 	next int, new_index int) {
+
+	snapshotCh := make(chan int)
+	// Unable to send AppendRPC because [next:lastIndex] are gone. Send
+	// Snapshot instead.
+	if next <= rf.state.getLastIndex() {
+		DTPrintf("%d: send snapshot to %d\n", rf.me, i)
+		go rf.sendSnapshot(done, snapshotCh, i, term)
+
+		select {
+		case replyTerm := <-snapshotCh:
+			if replyTerm > term {
+				appendReplyCh <- AppendEntriesReply{Success: false, Term: replyTerm}
+				return
+			}
+			// If succeeded, it means follower has the same state up to lastApplied.
+			lastApplied := rf.state.getLastApplied()
+			rf.state.setNextIndex(i, lastApplied+1)
+			rf.state.setMatchIndex(i, lastApplied)
+		case <-done:
+			return
+		}
+	}
+
 	for {
 		args := AppendEntriesArgs{}
 		args.Term = term
@@ -196,4 +219,34 @@ func (rf *Raft) appendNewEntries(done <-chan interface{}, heartbeat bool,
 	}
 
 	return appendReplyCh
+}
+
+func (rf *Raft) sendSnapshot(done <-chan interface{}, snapshotCh chan int,
+	i int, term int) {
+	// XXX: persist?
+	args := &InstallSnapshotArgs{
+		Term: term,
+		LastIncludedEntryIndex: rf.state.getLastIndex(),
+		LastIncludedEntryTerm:  rf.state.getLastTerm(),
+		Data: rf.persister.ReadSnapshot()}
+
+	reply := &InstallSnapshotReply{}
+
+LOOP:
+	for {
+		ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
+		select {
+		case <-done:
+			return
+		}
+
+		if !ok {
+			continue LOOP
+		}
+
+		select {
+		case <-done:
+		case snapshotCh <- reply.Term:
+		}
+	}
 }

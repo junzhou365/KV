@@ -97,14 +97,16 @@ func (rs *RaftState) appendLogEntry(entry RaftLogEntry) {
 	rs.Log = append(rs.Log, entry)
 }
 
+// Discard log entries up to the newIndex
 func (rs *RaftState) discardLogEnries(newIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	rs.lastIncludedEntryIndex = newIndex - 1
-	rs.lastIncludedEntryTerm = rs.Log[newIndex-1].Term
+	lastIndex := rs.lastIncludedEntryIndex
+	rs.lastIncludedEntryIndex = newIndex
+	rs.lastIncludedEntryTerm = rs.Log[newIndex-lastIndex].Term
 	// Keep the nil head
-	rs.Log = append(rs.Log[0:1], rs.Log[newIndex:]...)
+	rs.Log = append(rs.Log[0:1], rs.Log[newIndex+1-lastIndex:]...)
 }
 
 func (rs *RaftState) getCommitIndex() int {
@@ -147,4 +149,28 @@ func (rs *RaftState) setMatchIndex(i int, m int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 	rs.matchIndexes[i] = m
+}
+
+func (rs *RaftState) getLastIndex() int {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.lastIncludedEntryIndex
+}
+
+func (rs *RaftState) setLastIndex(i int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+	rs.lastIncludedEntryIndex = i
+}
+
+func (rs *RaftState) getLastTerm() int {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.lastIncludedEntryTerm
+}
+
+func (rs *RaftState) setLastTerm(t int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+	rs.lastIncludedEntryTerm = t
 }
