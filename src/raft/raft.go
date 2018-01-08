@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	"bytes"
-	"encoding/gob"
 	"labrpc"
 	"log"
 	"math/rand"
@@ -37,6 +35,7 @@ type ApplyMsg struct {
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
+	SavedCh     chan interface{}
 }
 
 //
@@ -74,15 +73,19 @@ const (
 	LEADER
 )
 
-func (rf *Raft) DiscardLogEntries(newIndex int) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	rf.state.discardLogEnries(newIndex)
+func (rf *Raft) CheckForTakingSnapshot(
+	newIndex int, max int, delta int, takeSnapshot func(int, int)) {
+	rf.state.checkForTakingSnapshot(newIndex, max, delta, rf.persister, takeSnapshot)
 }
 
-func (rf *Raft) GetLogEntryTerm(index int) int {
-	return rf.state.getLogEntryTerm(index)
+func (rf *Raft) GetLastIndexAndTerm() (index int, term int) {
+	index = rf.state.getLastIndex()
+	term = rf.state.getLastTerm()
+	return index, term
+}
+
+func (rf *Raft) LoadSnapshotMetaData(index int, term int) {
+	rf.state.loadSnapshotMetaData(index, term)
 }
 
 // return CurrentTerm and whether this server
@@ -90,66 +93,6 @@ func (rf *Raft) GetLogEntryTerm(index int) int {
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	return rf.state.getCurrentTerm(), rf.state.getRole() == LEADER
-}
-
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(rf.state.getCurrentTerm())
-	e.Encode(rf.state.getVotedFor())
-
-	rf.state.rw.RLock()
-	e.Encode(rf.state.Log)
-	rf.state.rw.RUnlock()
-
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-}
-
-//
-// restore previously persisted state.
-//
-func (rf *Raft) readPersist(data []byte) {
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		rf.state.setCurrentTerm(0)
-		rf.state.setVotedFor(-1)
-		rf.state.rw.Lock()
-		rf.state.Log = make([]RaftLogEntry, 1)
-		rf.state.rw.Unlock()
-	} else {
-		r := bytes.NewBuffer(data)
-		d := gob.NewDecoder(r)
-		var term int
-		d.Decode(&term)
-		rf.state.setCurrentTerm(term)
-
-		var votedFor int
-		d.Decode(&votedFor)
-		rf.state.setVotedFor(votedFor)
-
-		rf.state.rw.Lock()
-		d.Decode(&rf.state.Log)
-		rf.state.rw.Unlock()
-	}
 }
 
 //
@@ -180,7 +123,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
+	defer DTPrintf("%d: done persist]]", rf.me)
+	defer rf.state.persist(rf.persister)
+	defer DTPrintf("%d: [[start persist", rf.me)
 
 	resCh := <-rf.rpcCh
 
@@ -254,7 +200,10 @@ func min(a int, b int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
+	defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
+	defer DTPrintf("%d: done persist]]", rf.me)
+	defer rf.state.persist(rf.persister)
+	defer DTPrintf("%d: [[start persist", rf.me)
 
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
@@ -318,7 +267,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.state.getLogEntryTerm(deleteIndex) != entry.Term:
 				// delete conflicted entries
 				rf.state.rw.Lock()
-				rf.state.Log = append(rf.state.Log[:deleteIndex],
+				rf.state.Log = append(
+					rf.state.Log[:deleteIndex-rf.state.lastIncludedEntryIndex],
 					args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
 				rf.state.rw.Unlock()
 				break
@@ -351,6 +301,14 @@ func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
+
+	defer rf.state.persist(rf.persister)
+
+	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d\n",
+		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
+	DTPrintf("%d: lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
+		rf.state.getLastIndex(), rf.state.getLogLen())
 
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
@@ -368,17 +326,20 @@ func (rf *Raft) InstallSnapshot(
 
 	resCh <- resp
 
+	savedCh := make(chan interface{})
+	rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data, SavedCh: savedCh}
+	<-savedCh
+
 	if rf.state.getLogLen()-1 >= args.LastIncludedEntryIndex &&
 		args.LastIncludedEntryTerm == rf.state.getLogEntryTerm(args.LastIncludedEntryIndex) {
-		rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data}
 		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
 		return
 	}
 
 	rf.state.discardLogEnries(rf.state.getLogLen() - 1)
-	// reply snapshot
-	rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
-
+	savedCh = make(chan interface{})
+	rf.applyCh <- ApplyMsg{UseSnapshot: true, SavedCh: savedCh}
+	<-savedCh
 }
 
 func (rf *Raft) commitLoop() {
@@ -390,6 +351,8 @@ func (rf *Raft) commitLoop() {
 			for commitIndex > lastApplied {
 				lastApplied++
 				rf.state.setLastApplied(lastApplied)
+				DTPrintf("%d: updated lastApplied: %d, logLen: %d\n",
+					rf.me, lastApplied, rf.state.getLogLen())
 				command := rf.state.getLogEntry(lastApplied).Command
 				rf.applyCh <- ApplyMsg{Index: lastApplied, Command: command}
 				DTPrintf("%d: applied the command %v at log index %d\n",
@@ -483,7 +446,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.state.readPersist(persister)
 
 	rf.state.setRole(FOLLOWER)
 

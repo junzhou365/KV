@@ -12,9 +12,6 @@ type KVState struct {
 	Duplicates map[int]Op
 
 	liveRequests map[int]*Request
-
-	LastIncludedEntryIndex int
-	LastIncludedEntryTerm  int
 }
 
 func (k *KVState) getValue(key string) (string, bool) {
@@ -66,28 +63,4 @@ func (k *KVState) delRequest(i int) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
 	delete(k.liveRequests, i)
-}
-
-func (k *KVState) getLastIndex() int {
-	k.rw.RLock()
-	defer k.rw.RUnlock()
-	return k.LastIncludedEntryIndex
-}
-
-func (k *KVState) setLastIndex(lastIndex int) {
-	k.rw.Lock()
-	defer k.rw.Unlock()
-	k.LastIncludedEntryIndex = lastIndex
-}
-
-func (k *KVState) getLastTerm() int {
-	k.rw.RLock()
-	defer k.rw.RUnlock()
-	return k.LastIncludedEntryTerm
-}
-
-func (k *KVState) setLastTerm(lastTerm int) {
-	k.rw.Lock()
-	defer k.rw.Unlock()
-	k.LastIncludedEntryTerm = lastTerm
 }

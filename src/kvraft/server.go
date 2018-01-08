@@ -93,20 +93,32 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 	go func() {
 		defer close(msgStream)
 		for msg := range kv.applyCh {
+
+			if index, _ := kv.rf.GetLastIndexAndTerm(); msg.Index > 0 && msg.Index <= index {
+				continue
+			}
+
+			switch {
+			case msg.Snapshot != nil:
+				kv.persister.SaveSnapshot(msg.Snapshot)
+				close(msg.SavedCh)
+				continue
+
+			case msg.UseSnapshot:
+				kv.restoreSnapshot()
+				close(msg.SavedCh)
+				continue
+			}
+
 			op := msg.Command.(Op)
 			DTPrintf("%d: new msg. msg.Index: %d\n", kv.me, msg.Index)
 
-			if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
-				kv.state.setLastIndex(msg.Index - 1)
-				kv.state.setLastTerm(kv.rf.GetLogEntryTerm(msg.Index - 1))
-				kv.takeSnapshot()
-				kv.rf.DiscardLogEntries(msg.Index)
-			}
-
 			// Duplicate Op
 			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
-				DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
 				msg.Command = resOp
+				kv.rf.CheckForTakingSnapshot(
+					msg.Index, kv.maxraftstate, kv.stateDelta, kv.takeSnapshot)
+				DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
 				msgStream <- msg
 				continue
 			}
@@ -123,6 +135,8 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 			}
 
 			kv.state.setDup(op.ClientId, op)
+			kv.rf.CheckForTakingSnapshot(
+				msg.Index, kv.maxraftstate, kv.stateDelta, kv.takeSnapshot)
 			msg.Command = op
 			DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
 			msgStream <- msg
@@ -248,7 +262,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		Duplicates: make(map[int]Op)}
 
 	kv.persister = persister
-	kv.restoreSnapshot(persister.ReadSnapshot())
+	kv.restoreSnapshot()
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

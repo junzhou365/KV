@@ -425,6 +425,8 @@ func TestSnapshotRPC(t *testing.T) {
 	ck.Put("a", "A")
 	check(t, ck, "a", "A")
 
+	DTESTPrintf("0 1")
+
 	// a bunch of puts into the majority partition.
 	cfg.partition([]int{0, 1}, []int{2})
 	{
@@ -442,6 +444,8 @@ func TestSnapshotRPC(t *testing.T) {
 		t.Fatalf("logs were not trimmed (%v > 2*%v)", cfg.LogSize(), maxraftstate)
 	}
 
+	DTESTPrintf("0 2")
+
 	// now make group that requires participation of
 	// lagging server, so that it has to catch up.
 	cfg.partition([]int{0, 2}, []int{1})
@@ -457,6 +461,8 @@ func TestSnapshotRPC(t *testing.T) {
 
 	// now everybody
 	cfg.partition([]int{0, 1, 2}, []int{})
+
+	DTESTPrintf("connected all")
 
 	ck.Put("e", "E")
 	check(t, ck, "c", "C")
