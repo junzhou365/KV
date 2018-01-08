@@ -94,7 +94,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		// If unable to send AppendRPC due to [next:lastIndex] are gone, send
 		// Snapshot instead.
 		snapshotCh := make(chan int)
-		if next <= rf.state.getLastIndex() {
+		if !rf.state.indexExist(next) {
 			go rf.sendSnapshot(done, snapshotCh, i, term)
 
 			select {
@@ -124,11 +124,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		args.LeaderCommit = rf.state.getCommitIndex()
 
 		if !heartbeat {
-			left := next - rf.state.getLastIndex()
-			right := new_index + 1 - rf.state.getLastIndex()
-			rf.state.rw.RLock()
-			args.Entries = append(args.Entries, rf.state.Log[left:right]...)
-			rf.state.rw.RUnlock()
+			args.Entries = append(args.Entries, rf.state.getLogRange(next, new_index+1)...)
 		}
 		reply := new(AppendEntriesReply)
 		DTPrintf("%d sends Append RPC to %d for term %d. Args: pli: %d, plt: %d, enries: %+v\n",
@@ -165,7 +161,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			// Find the last entry of the conflicting term. The conflicting
 			// server will delete all entries after this new next
 			// XXX: might need update
-			for ; j > rf.state.getLastIndex(); j-- {
+			for ; rf.state.indexExist(j); j-- {
 				if rf.state.getLogEntryTerm(j) == reply.ConflictTerm {
 					break
 				}

@@ -123,10 +123,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
-	defer DTPrintf("%d: done persist]]", rf.me)
+	//defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
+	//defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
-	defer DTPrintf("%d: [[start persist", rf.me)
+	//defer DTPrintf("%d: [[start persist", rf.me)
 
 	resCh := <-rf.rpcCh
 
@@ -149,6 +149,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	isLeaderTermValid := args.Term == curTerm
 	isVotedForValid := curVotedFor == -1 || curVotedFor == args.CandidateId
 	isEntryUpToDate := false
+
 	// Is it most up-to-date?
 	logLen := rf.state.getLogLen()
 	lastLogIndex := logLen - 1
@@ -200,10 +201,13 @@ func min(a int, b int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
-	defer DTPrintf("%d: done persist]]", rf.me)
+	//defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
+	//defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
-	defer DTPrintf("%d: [[start persist", rf.me)
+	//defer DTPrintf("%d: [[start persist", rf.me)
+
+	DTPrintf("%d get Append for term %d from leader\n", rf.me, args.Term)
+	defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
 
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
@@ -219,7 +223,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	case args.Term < curTerm:
 		reply.Term = curTerm
 		reply.Success = false
-		//DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
+		DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
 		// Did not receive RPC from *current* leader
 		resp.toFollower = false
 		resCh <- resp
@@ -248,15 +252,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	case rf.state.getLogEntryTerm(args.PrevLogIndex) != args.PrevLogTerm:
 		reply.Success = false
 		reply.ConflictTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
-		rf.state.rw.RLock()
 		// find the first entry that has the conflicting term
-		for i, l := range rf.state.Log {
-			if l.Term == reply.ConflictTerm {
-				reply.ConflictIndex = i
+		streamDone := make(chan interface{})
+		for l := range rf.state.logEntryStream(streamDone) {
+			index, entry := l.index, l.entry
+			if entry.Term == reply.ConflictTerm {
+				reply.ConflictIndex = index
+				close(streamDone)
 				break
 			}
 		}
-		rf.state.rw.RUnlock()
 
 	default:
 		reply.Success = true
@@ -267,9 +272,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.state.getLogEntryTerm(deleteIndex) != entry.Term:
 				// delete conflicted entries
 				rf.state.rw.Lock()
-				rf.state.Log = append(
-					rf.state.Log[:deleteIndex-rf.state.lastIncludedEntryIndex],
-					args.Entries[deleteIndex-args.PrevLogIndex-1:]...)
+				rf.state.truncateLogWithNoLock(deleteIndex)
+				rf.state.appendLogEntriesWithNoLock(
+					args.Entries[deleteIndex-args.PrevLogIndex-1:])
+				DTPrintf("%d: append entries succeeds. log: %v\n", rf.me, rf.state.Log)
 				rf.state.rw.Unlock()
 				break
 			default:
@@ -283,7 +289,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			go func() { rf.commit <- true }()
 		}
 	}
-	DTPrintf("%d received Append for term %d from leader\n", rf.me, args.Term)
 }
 
 type InstallSnapshotArgs struct {
@@ -301,7 +306,7 @@ func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
+	//defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
 
 	defer rf.state.persist(rf.persister)
 
@@ -386,10 +391,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	} else {
 		term = rf.state.getCurrentTerm()
 		DTPrintf("%d: Start is called with command %+v\n", rf.me, command)
-		rf.state.appendLogEntry(RaftLogEntry{Term: term, Command: command})
-		index = rf.state.getLogLen() - 1
+		index = rf.state.appendLogEntry(RaftLogEntry{Term: term, Command: command})
 		go func() { rf.newEntry <- index }()
-		DTPrintf("%d: Start call on leader with command %v finished\n", rf.me, command)
+		DTPrintf("%d: Start call on leader with command %v finished at index: %d\n",
+			rf.me, command, index)
 	}
 
 	return index, term, isLeader
@@ -443,6 +448,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.state.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
 	// initialize from state persisted before a crash

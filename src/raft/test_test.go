@@ -320,6 +320,8 @@ func TestRejoin2B(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
+	DTESTPrintf("disconnected leader %d", leader1)
+
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
@@ -332,13 +334,19 @@ func TestRejoin2B(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 
+	DTESTPrintf("disconnected new leader %d", leader2)
+
 	// old leader connected again
 	cfg.connect(leader1)
+
+	DTESTPrintf("reconnected old leader %d", leader1)
 
 	cfg.one(104, 2)
 
 	// all together now
 	cfg.connect(leader2)
+
+	DTESTPrintf("reconnected new leader %d", leader2)
 
 	cfg.one(105, servers)
 

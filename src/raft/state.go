@@ -7,11 +7,15 @@ import (
 )
 
 type RaftState struct {
-	rw          sync.RWMutex
+	rw sync.RWMutex
+	me int //for debug
+
 	CurrentTerm int
 	VotedFor    int
 	role        int
-	Log         []RaftLogEntry // initialized with term 0 entry (empty RaftEntry)
+
+	logBase int            // log might be trimmed. We still want to have increasing indexes.
+	Log     []RaftLogEntry // initialized with term 0 entry (empty RaftEntry)
 
 	commitIndex int
 	lastApplied int
@@ -26,6 +30,11 @@ type RaftState struct {
 type RaftLogEntry struct {
 	Term    int
 	Command interface{}
+}
+
+type indexEntry struct {
+	index int
+	entry RaftLogEntry
 }
 
 func (rs *RaftState) getCurrentTerm() int {
@@ -65,7 +74,7 @@ func (rs *RaftState) setRole(r int) {
 }
 
 func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
-	offsettedLastIndex := index - rs.lastIncludedEntryIndex
+	offsettedLastIndex := index - rs.logBase
 
 	switch {
 	//case offsettedLastIndex < 0:
@@ -87,17 +96,17 @@ func (rs *RaftState) getLogEntryTerm(index int) int {
 func (rs *RaftState) getLogEntry(index int) RaftLogEntry {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.Log[index-rs.lastIncludedEntryIndex]
+	return rs.Log[index-rs.logBase]
 }
 
 func (rs *RaftState) getLogLenWithNoLock() int {
-	return len(rs.Log) + rs.lastIncludedEntryIndex
+	return len(rs.Log) + rs.logBase
 }
 
 func (rs *RaftState) getLogLen() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return len(rs.Log) + rs.lastIncludedEntryIndex
+	return rs.getLogLenWithNoLock()
 }
 
 func (rs *RaftState) getLogSize() int {
@@ -106,21 +115,59 @@ func (rs *RaftState) getLogSize() int {
 	return len(rs.Log)
 }
 
-func (rs *RaftState) appendLogEntry(entry RaftLogEntry) {
+func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
+	stream := make(chan indexEntry)
+	go func() {
+		rs.rw.RLock()
+		defer rs.rw.RUnlock()
+
+		defer close(stream)
+		for i, l := range rs.Log {
+			select {
+			case stream <- indexEntry{index: i + rs.logBase, entry: l}:
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	return stream
+}
+
+// Delete entries [deleteIndex:]
+func (rs *RaftState) truncateLogWithNoLock(deleteIndex int) {
+	rs.Log = rs.Log[:deleteIndex-rs.logBase]
+}
+
+// return last log entry index
+func (rs *RaftState) appendLogEntriesWithNoLock(entries []RaftLogEntry) int {
+	rs.Log = append(rs.Log, entries...)
+	DTPrintf("%d: after append, log: %v\n", rs.me, rs.Log)
+	return len(rs.Log) + rs.logBase - 1
+}
+
+func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
-	rs.Log = append(rs.Log, entry)
+	return rs.appendLogEntriesWithNoLock([]RaftLogEntry{entry})
 }
 
+// start: inclusive, end: exclusive
+func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	offStart, offEnd := start-rs.logBase, end-rs.logBase
+	return rs.Log[offStart:offEnd]
+}
+
+// Discard log entries up to the newIndex
 func (rs *RaftState) discardLogEnriesWithNoLock(newIndex int) {
-	lastIndex := rs.lastIncludedEntryIndex
-	rs.lastIncludedEntryIndex = newIndex
-	rs.lastIncludedEntryTerm = rs.Log[newIndex-lastIndex].Term
 	// Keep the nil head
-	rs.Log = append(rs.Log[0:1], rs.Log[newIndex+1-lastIndex:]...)
+	rs.Log = append(rs.Log[0:1], rs.Log[newIndex+1-rs.logBase:]...)
 }
 
-// Discard log entries up to the newIndex and update last included index and term
+// Discard log entries up to the newIndex
 func (rs *RaftState) discardLogEnries(newIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
@@ -205,6 +252,14 @@ func (rs *RaftState) setLastTerm(t int) {
 	rs.lastIncludedEntryTerm = t
 }
 
+// Is index > logBase ?
+func (rs *RaftState) indexExist(index int) bool {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	return index > rs.logBase
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -232,7 +287,7 @@ func (rs *RaftState) persist(persister *Persister) {
 
 	data := w.Bytes()
 	persister.SaveRaftState(data)
-	DTPrintf("In persist(), Log size: %d, data size: %d\n", len(rs.Log), len(data))
+	DTPrintf("%d: In persist(), Log size: %d, data size: %d\n", rs.me, len(rs.Log), len(data))
 }
 
 //
