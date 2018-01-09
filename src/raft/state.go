@@ -3,6 +3,7 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
+	"log"
 	"sync"
 )
 
@@ -77,9 +78,10 @@ func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
 	offsettedLastIndex := index - rs.logBase
 
 	switch {
-	//case offsettedLastIndex < 0:
-	//return -1
+	case offsettedLastIndex < 0 || offsettedLastIndex >= len(rs.Log):
+		DTPrintf("%d: logBase: %d, offset: %d\n", rs.me, rs.logBase, offsettedLastIndex)
 	case offsettedLastIndex == 0:
+		DTPrintf("%d: logBase: %d, lastTerm: %d\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
 		return rs.lastIncludedEntryTerm
 	}
 
@@ -136,6 +138,9 @@ func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 
 // Delete entries [deleteIndex:]
 func (rs *RaftState) truncateLogWithNoLock(deleteIndex int) {
+	if deleteIndex <= rs.logBase {
+		log.Fatal("invalid deleteIndex")
+	}
 	rs.Log = rs.Log[:deleteIndex-rs.logBase]
 }
 
@@ -161,18 +166,22 @@ func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
 	return rs.Log[offStart:offEnd]
 }
 
-// Discard log entries up to the newIndex
-func (rs *RaftState) discardLogEnriesWithNoLock(newIndex int) {
+// Discard log entries up to the lastIndex
+func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 	// Keep the nil head
-	rs.Log = append(rs.Log[0:1], rs.Log[newIndex+1-rs.logBase:]...)
+	rs.lastIncludedEntryIndex = lastIndex
+	rs.lastIncludedEntryTerm = rs.getLogEntryTermWithNoLock(lastIndex)
+
+	rs.Log = append(rs.Log[0:1], rs.Log[lastIndex+1-rs.logBase:]...)
+	rs.logBase = lastIndex
 }
 
-// Discard log entries up to the newIndex
-func (rs *RaftState) discardLogEnries(newIndex int) {
+// Discard log entries up to the lastIndex
+func (rs *RaftState) discardLogEnries(lastIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	rs.discardLogEnriesWithNoLock(newIndex)
+	rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
 func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
@@ -182,8 +191,10 @@ func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
 	rs.lastIncludedEntryIndex = index
 	rs.lastIncludedEntryTerm = term
 
+	rs.logBase = index
+
 	rs.lastApplied = index
-	rs.commitIndex = min(index, rs.commitIndex)
+	rs.commitIndex = index
 }
 
 func (rs *RaftState) getCommitIndex() int {
@@ -315,21 +326,5 @@ func (rs *RaftState) readPersist(persister *Persister) {
 		d.Decode(&rs.CurrentTerm)
 		d.Decode(&rs.VotedFor)
 		d.Decode(&rs.Log)
-	}
-}
-
-// Reason we need this is RaftStateSize should be accessed with lock.
-// Following operations should see the consistent size.
-func (rs *RaftState) checkForTakingSnapshot(
-	newIndex int, max int, delta int, persister *Persister,
-	takeSnapshot func(int, int)) {
-
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
-
-	if max-persister.RaftStateSize() <= delta {
-		// we must first save snapshot
-		takeSnapshot(newIndex, rs.getLogEntryTermWithNoLock(newIndex))
-		rs.discardLogEnriesWithNoLock(newIndex)
 	}
 }

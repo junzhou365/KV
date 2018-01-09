@@ -65,7 +65,8 @@ func (rf *Raft) updateCommitIndex(term int) {
 	rf.state.rw.Lock()
 	defer rf.state.rw.Unlock()
 
-	DTPrintf("%d: try update commitIndex for term %d\n", rf.me, term)
+	DTPrintf("%d: try update commitIndex for term %d. orig commitIndex: %d\n",
+		rf.me, term, rf.state.commitIndex)
 
 	logLen := rf.state.getLogLenWithNoLock()
 	for n := logLen - 1; n > rf.state.commitIndex; n-- {
@@ -77,7 +78,7 @@ func (rf *Raft) updateCommitIndex(term int) {
 			}
 		}
 		DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		if count > len(rf.peers)/2 && n > 0 &&
+		if count > len(rf.peers)/2 && n > rf.state.commitIndex &&
 			term == rf.state.getLogEntryTermWithNoLock(n) {
 			rf.state.commitIndex = n
 			go func() { rf.commit <- true }()
@@ -95,7 +96,8 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		// Snapshot instead.
 		snapshotCh := make(chan int)
 		if !rf.state.indexExist(next) {
-			go rf.sendSnapshot(done, snapshotCh, i, term)
+			lastIndex, lastTerm := rf.state.getLastIndex(), rf.state.getLastTerm()
+			go rf.sendSnapshot(done, snapshotCh, i, term, lastIndex, lastTerm)
 
 			select {
 			case replyTerm := <-snapshotCh:
@@ -104,7 +106,6 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 					return
 				}
 				// If succeeded, it means follower has the same state up to lastIncludedEntryIndex.
-				lastIndex := rf.state.getLastIndex()
 				rf.state.setNextIndex(i, lastIndex+1)
 				rf.state.setMatchIndex(i, lastIndex)
 				next = lastIndex + 1
@@ -118,8 +119,8 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		args := AppendEntriesArgs{}
 		args.Term = term
 		args.PrevLogIndex = next - 1
-		DTPrintf("%d: logLen: %d, prevLogIndex: %d for %d\n", rf.me,
-			rf.state.getLogLen(), next-1, i)
+		DTPrintf("%d: logLen: %d, prevLogIndex: %d, new_index: %d for %d\n", rf.me,
+			rf.state.getLogLen(), next-1, new_index, i)
 		args.PrevLogTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
 		args.LeaderCommit = rf.state.getCommitIndex()
 
@@ -127,7 +128,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			args.Entries = append(args.Entries, rf.state.getLogRange(next, new_index+1)...)
 		}
 		reply := new(AppendEntriesReply)
-		DTPrintf("%d sends Append RPC to %d for term %d. Args: pli: %d, plt: %d, enries: %+v\n",
+		DTPrintf("%d sends Append RPC to %d for term %d. Args: pli: %d, plt: %d, entries: %+v\n",
 			rf.me, i, term, args.PrevLogIndex, args.PrevLogTerm, args.Entries)
 
 		ok := rf.peers[i].Call("Raft.AppendEntries", &args, reply)
@@ -141,6 +142,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		switch {
 		// Retry. Failed reply makes other cases meaningless
 		case !ok:
+			DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
 			continue
 
 		case !reply.Success && reply.Term > term:
@@ -222,12 +224,12 @@ func (rf *Raft) appendNewEntries(done <-chan interface{}, heartbeat bool,
 }
 
 func (rf *Raft) sendSnapshot(done <-chan interface{}, snapshotCh chan int,
-	i int, term int) {
+	i int, term int, lastIndex int, lastTerm int) {
 	// XXX: persist?
 	args := &InstallSnapshotArgs{
 		Term: term,
-		LastIncludedEntryIndex: rf.state.getLastIndex(),
-		LastIncludedEntryTerm:  rf.state.getLastTerm(),
+		LastIncludedEntryIndex: lastIndex,
+		LastIncludedEntryTerm:  lastTerm,
 		Data: rf.persister.ReadSnapshot()}
 
 	reply := &InstallSnapshotReply{}

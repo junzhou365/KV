@@ -73,19 +73,27 @@ const (
 	LEADER
 )
 
-func (rf *Raft) CheckForTakingSnapshot(
-	newIndex int, max int, delta int, takeSnapshot func(int, int)) {
-	rf.state.checkForTakingSnapshot(newIndex, max, delta, rf.persister, takeSnapshot)
-}
-
 func (rf *Raft) GetLastIndexAndTerm() (index int, term int) {
 	index = rf.state.getLastIndex()
 	term = rf.state.getLastTerm()
 	return index, term
 }
 
+// Only used for accessing persister
+func (rf *Raft) GetPersisterLock() *sync.RWMutex {
+	return &rf.state.rw
+}
+
 func (rf *Raft) LoadSnapshotMetaData(index int, term int) {
 	rf.state.loadSnapshotMetaData(index, term)
+}
+
+func (rf *Raft) DiscardLogEnriesWithNoLock(index int) {
+	rf.state.discardLogEnriesWithNoLock(index)
+}
+
+func (rf *Raft) GetLogEntryTerm(index int) int {
+	return rf.state.getLogEntryTerm(index)
 }
 
 // return CurrentTerm and whether this server
@@ -206,7 +214,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.state.persist(rf.persister)
 	//defer DTPrintf("%d: [[start persist", rf.me)
 
-	DTPrintf("%d get Append for term %d from leader\n", rf.me, args.Term)
+	DTPrintf("%d get Append for term %d from leader. %+v\n", rf.me, args.Term, args)
 	defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
 
 	var resCh chan rpcResp
