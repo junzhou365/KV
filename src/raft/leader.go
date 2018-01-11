@@ -19,7 +19,6 @@ func (rf *Raft) runLeader() {
 	term := rf.state.getCurrentTerm()
 
 	heartbeatTimer := time.After(0)
-	var appendReplyCh <-chan AppendEntriesReply
 	last_seen_index := 0
 
 	respCh := make(chan rpcResp)
@@ -27,40 +26,44 @@ func (rf *Raft) runLeader() {
 	// cannot use defer close(done) here because the "done" will be bound to a
 	// future closed channel
 	done := make(chan interface{})
+	defer close(done)
+
+	//rf.sendChs = make([]chan sendJob, len(rf.peers))
+	//for i := 0; i < len(rf.peers); i++ {
+	//rf.sendChs[i] = make(chan sendJob)
+	//go rf.sendLoop(done, rf.sendChs[i])
+	//}
+
+	rf.appendReplyCh = make(chan AppendEntriesReply)
 
 	for {
 		select {
 		case rf.rpcCh <- respCh:
 			if r := <-respCh; r.toFollower {
-				close(done)
 				return
 			}
 
 		case <-heartbeatTimer:
-			close(done)
-			done = make(chan interface{})
 			heartbeatTimer = time.After(rf.heartbeatInterval)
-			appendReplyCh = rf.appendNewEntries(done, true, term, rf.state.getLogLen()-1)
+			rf.appendNewEntries(done, true, term, rf.state.getLogLen()-1)
 
 		case index := <-rf.newEntry:
 			if index > last_seen_index {
-				close(done)
-				done = make(chan interface{})
-				appendReplyCh = rf.appendNewEntries(done, false, term, index)
+				rf.appendNewEntries(done, false, term, index)
 				last_seen_index = index
 			}
 
-		case reply := <-appendReplyCh:
+		case reply := <-rf.appendReplyCh:
 			if !reply.Success && reply.Term > term {
 				rf.state.setCurrentTerm(reply.Term)
 				rf.state.setRole(FOLLOWER)
-				close(done)
 				return
 			}
 			rf.updateCommitIndex(term)
 		}
 	}
 }
+
 func (rf *Raft) updateCommitIndex(term int) {
 	rf.state.rw.Lock()
 	defer rf.state.rw.Unlock()
@@ -87,9 +90,10 @@ func (rf *Raft) updateCommitIndex(term int) {
 	}
 }
 
-func (rf *Raft) sendAppend(done <-chan interface{},
-	appendReplyCh chan AppendEntriesReply, i int, heartbeat bool, term int,
-	next int, new_index int) {
+func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term int,
+	next int, newIndex int) {
+
+	DTPrintf("%d: begins to send Append to %d\n", rf.me, i)
 
 	for {
 		// If unable to send AppendRPC due to [next:lastIndex] are gone, send
@@ -102,7 +106,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			select {
 			case replyTerm := <-snapshotCh:
 				if replyTerm > term {
-					appendReplyCh <- AppendEntriesReply{Success: false, Term: replyTerm}
+					rf.appendReplyCh <- AppendEntriesReply{Success: false, Term: replyTerm}
 					return
 				}
 				// If succeeded, it means follower has the same state up to lastIncludedEntryIndex.
@@ -111,6 +115,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 				next = lastIndex + 1
 				DTPrintf("%d: updated next %d, log[next] is %v\n", rf.me, next,
 					rf.state.getLogEntry(next))
+
 			case <-done:
 				return
 			}
@@ -119,13 +124,13 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 		args := AppendEntriesArgs{}
 		args.Term = term
 		args.PrevLogIndex = next - 1
-		DTPrintf("%d: logLen: %d, prevLogIndex: %d, new_index: %d for %d\n", rf.me,
-			rf.state.getLogLen(), next-1, new_index, i)
+		DTPrintf("%d: logLen: %d, prevLogIndex: %d, newIndex: %d for %d\n", rf.me,
+			rf.state.getLogLen(), next-1, newIndex, i)
 		args.PrevLogTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
 		args.LeaderCommit = rf.state.getCommitIndex()
 
 		if !heartbeat {
-			args.Entries = append(args.Entries, rf.state.getLogRange(next, new_index+1)...)
+			args.Entries = append(args.Entries, rf.state.getLogRange(next, newIndex+1)...)
 		}
 		reply := new(AppendEntriesReply)
 		DTPrintf("%d sends Append RPC to %d for term %d. Args: pli: %d, plt: %d, entries: %+v\n",
@@ -147,9 +152,14 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 
 		case !reply.Success && reply.Term > term:
 			select {
-			case appendReplyCh <- *reply:
+			case rf.appendReplyCh <- *reply:
 			case <-done:
 			}
+			return
+
+		case !reply.Success && heartbeat:
+			DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
+			rf.sendAppend(done, i, false, term, next, newIndex)
 			return
 
 		case !reply.Success && reply.ConflictTerm == -1:
@@ -159,7 +169,7 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			DTPrintf("%d: conflict index: %d\n", rf.me, next)
 
 		case !reply.Success && reply.ConflictTerm != -1:
-			j := new_index
+			j := newIndex
 			// Find the last entry of the conflicting term. The conflicting
 			// server will delete all entries after this new next
 			// XXX: might need update
@@ -171,22 +181,29 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 			next = j + 1
 			DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, next)
 
-		case reply.Success:
-			iNext := next + len(args.Entries)
-			iMatch := args.PrevLogIndex + len(args.Entries)
-			DTPrintf("%d: update %d's next %d and match %d\n", rf.me, i,
-				iNext, iMatch)
-			rf.state.setNextIndex(i, iNext)
-			rf.state.setMatchIndex(i, iMatch)
-			if rf.state.getLogLen()-1 >= iNext {
-				DTPrintf("%d: append new logs after truncating %d's logs\n", rf.me, i)
-				rf.sendAppend(done, appendReplyCh, i, false, term, iNext, new_index)
+		case reply.Success && heartbeat:
+			if rf.state.getLogLen()-1 >= rf.state.getNextIndex(i) {
+				DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
+				rf.sendAppend(done, i, false, term, next, newIndex)
 			}
-			if !heartbeat {
-				select {
-				case appendReplyCh <- *reply:
-				case <-done:
-				}
+			return
+
+		case reply.Success:
+			iMatch := args.PrevLogIndex + len(args.Entries)
+			DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+			rf.state.setMatchIndex(i, iMatch)
+
+			iNext := next + len(args.Entries)
+			rf.state.setNextIndex(i, iNext)
+			if matchIndex := rf.state.getMatchIndex(i); iNext > matchIndex {
+				rf.state.setNextIndex(i, iNext)
+			} else {
+				rf.state.setNextIndex(i, matchIndex+1)
+			}
+
+			select {
+			case rf.appendReplyCh <- *reply:
+			case <-done:
 			}
 			return
 
@@ -197,19 +214,36 @@ func (rf *Raft) sendAppend(done <-chan interface{},
 	}
 }
 
-// Should run in order
-func (rf *Raft) appendNewEntries(done <-chan interface{}, heartbeat bool,
-	term int, new_index int) <-chan AppendEntriesReply {
+//type sendJob struct {
+//i         int
+//heartbeat bool
+//term      int
+//next      int
+//newIndex  int
+//}
+
+//func (rf *Raft) sendLoop(done <-chan interface{}, sendCh <-chan sendJob) {
+//for {
+//select {
+//case <-done:
+//return
+//case job := <-sendCh:
+//rf.sendAppend(done, job.i, job.heartbeat, job.term, job.next, job.newIndex)
+//DTPrintf("%d: finish job %+v\n", rf.me, job)
+//}
+//}
+//}
+
+func (rf *Raft) appendNewEntries(
+	done <-chan interface{}, heartbeat bool, term int, newIndex int) {
 
 	// save before a change
 	rf.state.persist(rf.persister)
 
-	appendReplyCh := make(chan AppendEntriesReply)
-
 	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
 	for i := 0; i < len(rf.peers); i++ {
 		next := rf.state.getNextIndex(i)
-		if !heartbeat && next > new_index {
+		if !heartbeat && next > newIndex {
 			DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
 			continue
 		}
@@ -217,10 +251,24 @@ func (rf *Raft) appendNewEntries(done <-chan interface{}, heartbeat bool,
 		if i == rf.me {
 			continue
 		}
-		go rf.sendAppend(done, appendReplyCh, i, heartbeat, term, next, new_index)
-	}
 
-	return appendReplyCh
+		go rf.sendAppend(done, i, heartbeat, term, next, newIndex)
+
+		//go func(i int) {
+		//job := sendJob{
+		//i:         i,
+		//heartbeat: heartbeat,
+		//term:      term,
+		//next:      next,
+		//newIndex:  newIndex}
+
+		//DTPrintf("%d: send job %+v\n", rf.me, job)
+
+		//rf.sendChs[i] <- job
+
+		//DTPrintf("%d: sent job %+v\n", rf.me, job)
+		//}(i)
+	}
 }
 
 func (rf *Raft) sendSnapshot(done <-chan interface{}, snapshotCh chan int,

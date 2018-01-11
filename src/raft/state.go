@@ -233,10 +233,20 @@ func (rs *RaftState) setNextIndex(i int, n int) {
 	rs.nextIndexes[i] = n
 }
 
+func (rs *RaftState) getMatchIndex(i int) int {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.matchIndexes[i]
+}
+
+// Only succeeds if m > current match index
 func (rs *RaftState) setMatchIndex(i int, m int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
-	rs.matchIndexes[i] = m
+
+	if m > rs.matchIndexes[i] {
+		rs.matchIndexes[i] = m
+	}
 }
 
 func (rs *RaftState) getLastIndex() int {
@@ -298,7 +308,7 @@ func (rs *RaftState) persist(persister *Persister) {
 
 	data := w.Bytes()
 	persister.SaveRaftState(data)
-	DTPrintf("%d: In persist(), Log size: %d, data size: %d\n", rs.me, len(rs.Log), len(data))
+	//DTPrintf("%d: In persist(), Log size: %d, data size: %d\n", rs.me, len(rs.Log), len(data))
 }
 
 //

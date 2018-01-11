@@ -56,6 +56,8 @@ type Raft struct {
 	commit            chan bool
 	applyCh           chan ApplyMsg
 	newEntry          chan int
+	//sendChs           []chan sendJob
+	appendReplyCh chan AppendEntriesReply
 }
 
 type rpcResp struct {
@@ -318,22 +320,29 @@ func (rf *Raft) InstallSnapshot(
 
 	defer rf.state.persist(rf.persister)
 
-	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d\n",
-		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
+	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d, args.Term: %d\n",
+		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm, args.Term)
 	DTPrintf("%d: lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
 		rf.state.getLastIndex(), rf.state.getLogLen())
 
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
 
+	term := rf.state.getCurrentTerm()
+
 	resp := rpcResp{toFollower: false}
-	if rf.state.getCurrentTerm() < args.Term {
+	switch {
+	case term < args.Term:
 		rf.state.setCurrentTerm(args.Term)
 		rf.state.setRole(FOLLOWER)
 		resp.toFollower = true
 		resCh <- resp
 
 		reply.Term = args.Term
+		return
+
+	case term > args.Term:
+		reply.Term = term
 		return
 	}
 

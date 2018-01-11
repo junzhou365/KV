@@ -55,11 +55,10 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
-	DTESTPrintf("rejoin old leader %d", leader1)
-
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
+	DTESTPrintf("rejoin old leader %d", leader1)
 	leader2 := cfg.checkOneLeader()
 
 	DTESTPrintf("no quorum (disconnect %d, %d)", leader2, (leader2+1)%servers)
