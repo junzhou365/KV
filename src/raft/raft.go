@@ -57,7 +57,7 @@ type Raft struct {
 	applyCh           chan ApplyMsg
 	newEntry          chan int
 	//sendChs           []chan sendJob
-	appendReplyCh chan AppendEntriesReply
+	appendReplyCh chan bool
 }
 
 type rpcResp struct {
@@ -316,15 +316,13 @@ func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	//defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
 
 	defer rf.state.persist(rf.persister)
 
 	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d, args.Term: %d\n",
 		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm, args.Term)
-	DTPrintf("%d: lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
-		rf.state.getLastIndex(), rf.state.getLogLen())
-
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
 
@@ -347,6 +345,15 @@ func (rf *Raft) InstallSnapshot(
 	}
 
 	resCh <- resp
+
+	DTPrintf("%d: lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
+		rf.state.getLastIndex(), rf.state.getLogLen())
+
+	// We have saved this snapshot
+	if args.LastIncludedEntryIndex < rf.state.getLastIndex() {
+		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
+		return
+	}
 
 	savedCh := make(chan interface{})
 	rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data, SavedCh: savedCh}

@@ -158,10 +158,7 @@ func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
 }
 
 // start: inclusive, end: exclusive
-func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-
+func (rs *RaftState) getLogRangeWithNoLock(start int, end int) []RaftLogEntry {
 	offStart, offEnd := start-rs.logBase, end-rs.logBase
 	return rs.Log[offStart:offEnd]
 }
@@ -197,6 +194,10 @@ func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
 	rs.commitIndex = index
 }
 
+func (rs *RaftState) getCommitIndexWithNoLock() int {
+	return rs.commitIndex
+}
+
 func (rs *RaftState) getCommitIndex() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
@@ -227,10 +228,22 @@ func (rs *RaftState) getNextIndex(i int) int {
 	return rs.nextIndexes[i]
 }
 
+func (rs *RaftState) getNextIndexWithNoLock(i int) int {
+	return rs.nextIndexes[i]
+}
+
 func (rs *RaftState) setNextIndex(i int, n int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
-	rs.nextIndexes[i] = n
+	rs.setNextIndexWithNoLock(i, n)
+}
+
+func (rs *RaftState) setNextIndexWithNoLock(i int, n int) {
+	if n > rs.matchIndexes[i] {
+		rs.nextIndexes[i] = n
+	} else {
+		rs.nextIndexes[i] = rs.matchIndexes[i] + 1
+	}
 }
 
 func (rs *RaftState) getMatchIndex(i int) int {
@@ -239,11 +252,19 @@ func (rs *RaftState) getMatchIndex(i int) int {
 	return rs.matchIndexes[i]
 }
 
+func (rs *RaftState) getMatchIndexWithNoLock(i int) int {
+	return rs.matchIndexes[i]
+}
+
 // Only succeeds if m > current match index
 func (rs *RaftState) setMatchIndex(i int, m int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
+	rs.setMatchIndexWithNoLock(i, m)
+}
+
+func (rs *RaftState) setMatchIndexWithNoLock(i int, m int) {
 	if m > rs.matchIndexes[i] {
 		rs.matchIndexes[i] = m
 	}
@@ -252,6 +273,10 @@ func (rs *RaftState) setMatchIndex(i int, m int) {
 func (rs *RaftState) getLastIndex() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
+	return rs.lastIncludedEntryIndex
+}
+
+func (rs *RaftState) getLastIndexWithNoLock() int {
 	return rs.lastIncludedEntryIndex
 }
 
@@ -267,6 +292,10 @@ func (rs *RaftState) getLastTerm() int {
 	return rs.lastIncludedEntryTerm
 }
 
+func (rs *RaftState) getLastTermWithNoLock() int {
+	return rs.lastIncludedEntryTerm
+}
+
 func (rs *RaftState) setLastTerm(t int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
@@ -274,10 +303,13 @@ func (rs *RaftState) setLastTerm(t int) {
 }
 
 // Is index > logBase ?
+func (rs *RaftState) indexExistWithNoLock(index int) bool {
+	return index > rs.logBase
+}
+
 func (rs *RaftState) indexExist(index int) bool {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-
 	return index > rs.logBase
 }
 
