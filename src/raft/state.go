@@ -95,6 +95,10 @@ func (rs *RaftState) getLogEntryTerm(index int) int {
 	return rs.getLogEntryTermWithNoLock(index)
 }
 
+func (rs *RaftState) getLogEntryWithNoLock(index int) RaftLogEntry {
+	return rs.Log[index-rs.logBase]
+}
+
 func (rs *RaftState) getLogEntry(index int) RaftLogEntry {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
@@ -117,12 +121,9 @@ func (rs *RaftState) getLogSize() int {
 	return len(rs.Log)
 }
 
-func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
+func (rs *RaftState) logEntryStreamWithNoLock(done <-chan interface{}) <-chan indexEntry {
 	stream := make(chan indexEntry)
 	go func() {
-		rs.rw.RLock()
-		defer rs.rw.RUnlock()
-
 		defer close(stream)
 		for i, l := range rs.Log {
 			select {

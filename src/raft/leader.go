@@ -35,27 +35,90 @@ func (rf *Raft) runLeader() {
 	//}
 
 	rf.appendReplyCh = make(chan bool)
+	signalCh := make(chan int, 1000)
+
+	go rf.sendLoop(done, signalCh, term)
 
 	for {
 		select {
 		case rf.rpcCh <- respCh:
 			if r := <-respCh; r.toFollower {
+				DTPrintf("%d: exit leader loop\n", rf.me)
 				return
 			}
 
 		case <-heartbeatTimer:
 			heartbeatTimer = time.After(rf.heartbeatInterval)
-			rf.appendNewEntries(done, true, term, rf.state.getLogLen()-1)
+			DTPrintf("%d: signalCh len: %d\n", rf.me, len(signalCh))
+			signalCh <- -1
 
 		case index := <-rf.newEntry:
 			if index > last_seen_index {
-				rf.appendNewEntries(done, false, term, index)
+				DTPrintf("%d: signalCh len: %d\n", rf.me, len(signalCh))
+				signalCh <- index
 				last_seen_index = index
 			}
 
 		case <-rf.appendReplyCh:
+			DTPrintf("%d: exit leader loop\n", rf.me)
 			return
 		}
+	}
+}
+
+func (rf *Raft) sendLoop(done <-chan interface{}, signalCh <-chan int, term int) {
+	for {
+		select {
+		case <-done:
+			return
+		case index := <-signalCh:
+			if index == -1 {
+				rf.appendNewEntries(done, true, term, -1)
+			} else {
+				rf.appendNewEntries(done, false, term, index)
+			}
+		}
+	}
+}
+
+func (rf *Raft) appendNewEntries(
+	done <-chan interface{}, heartbeat bool, term int, newIndex int) {
+
+	// save before a change
+	rf.state.persist(rf.persister)
+
+	if newIndex == -1 {
+		newIndex = rf.state.getLogLen() - 1
+	}
+
+	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
+	for i := 0; i < len(rf.peers); i++ {
+		next := rf.state.getNextIndex(i)
+		if !heartbeat && next > newIndex {
+			DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
+			continue
+		}
+
+		if i == rf.me {
+			continue
+		}
+
+		go rf.sendAppend(done, i, heartbeat, term, next, newIndex)
+
+		//go func(i int) {
+		//job := sendJob{
+		//i:         i,
+		//heartbeat: heartbeat,
+		//term:      term,
+		//next:      next,
+		//newIndex:  newIndex}
+
+		//DTPrintf("%d: send job %+v\n", rf.me, job)
+
+		//rf.sendChs[i] <- job
+
+		//DTPrintf("%d: sent job %+v\n", rf.me, job)
+		//}(i)
 	}
 }
 
@@ -65,24 +128,32 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 	DTPrintf("%d: begins to send Append to %d\n", rf.me, i)
 
 	newNext := next
+	oldNext := newNext
 
 	for {
 		// If unable to send AppendRPC due to [next:lastIndex] are gone, send
 		// Snapshot instead.
+		oldNext = newNext
 		newNext = rf.sendSnapshot(done, i, term, newNext)
 
-		if newNext < 0 {
-			DTPrintf("%d: for %d, newNext: %d. returning!!\n", rf.me, i, newNext)
+		rf.state.rw.RLock()
+		DTPrintf("%d: [RLOCK] for %d start processing Append req\n", rf.me, i)
+
+		if newNext < 0 || (!heartbeat && newNext > newIndex) {
+			DTPrintf("%d: for %d, newNext: %d, oldNext: %d, newIndex: %d. returning!!\n",
+				rf.me, i, newNext, oldNext, newIndex)
+
+			rf.state.rw.RUnlock()
+			DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			return
 		}
 
-		rf.state.rw.RLock()
 		DTPrintf("%d: for %d [RLOCK] start processing Append req\n", rf.me, i)
 
 		if !rf.state.indexExistWithNoLock(newNext) {
 			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 			rf.state.rw.RUnlock()
-			DTPrintf("%d: for %d [UNRLOCK] finish processing Append req\n", rf.me, i)
+			DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			continue
 		}
 
@@ -101,7 +172,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		}
 
 		rf.state.rw.RUnlock()
-		DTPrintf("%d: for %d [UNRLOCK] finish processing Append req\n", rf.me, i)
+		DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
 		reply := new(AppendEntriesReply)
 		DTPrintf("%d sends Append RPC to %d for term %d. Args: %+v\n", rf.me, i, term, args)
@@ -119,7 +190,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 
 		shouldReturn := false
 
-		if len(args.Entries) > 0 && !rf.state.indexExistWithNoLock(newIndex+1) {
+		if !heartbeat && !rf.state.indexExistWithNoLock(newIndex+1) {
 			shouldReturn = true
 		}
 
@@ -135,11 +206,14 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 			rf.state.CurrentTerm = reply.Term
 			rf.state.role = FOLLOWER
 			DTPrintf("%d: discovered new term\n", rf.me)
+			DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
+			rf.state.rw.Unlock()
+			DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
 			select {
 			case rf.appendReplyCh <- true:
 			case <-done:
 			}
-			shouldReturn = true
+			return
 
 		case !reply.Success && heartbeat:
 			DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
@@ -248,43 +322,6 @@ func (rf *Raft) updateCommitIndexWithNoLock(term int) {
 //}
 //}
 
-func (rf *Raft) appendNewEntries(
-	done <-chan interface{}, heartbeat bool, term int, newIndex int) {
-
-	// save before a change
-	rf.state.persist(rf.persister)
-
-	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
-	for i := 0; i < len(rf.peers); i++ {
-		next := rf.state.getNextIndex(i)
-		if !heartbeat && next > newIndex {
-			DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
-			continue
-		}
-
-		if i == rf.me {
-			continue
-		}
-
-		go rf.sendAppend(done, i, heartbeat, term, next, newIndex)
-
-		//go func(i int) {
-		//job := sendJob{
-		//i:         i,
-		//heartbeat: heartbeat,
-		//term:      term,
-		//next:      next,
-		//newIndex:  newIndex}
-
-		//DTPrintf("%d: send job %+v\n", rf.me, job)
-
-		//rf.sendChs[i] <- job
-
-		//DTPrintf("%d: sent job %+v\n", rf.me, job)
-		//}(i)
-	}
-}
-
 // return
 // -1: leadership lost
 func (rf *Raft) sendSnapshot(done <-chan interface{}, i int, term int, next int) int {
@@ -292,6 +329,14 @@ LOOP:
 	for {
 		rf.state.rw.RLock()
 		DTPrintf("%d: for %d [RLOCK] start processing Snapshot req\n", rf.me, i)
+
+		select {
+		case <-done:
+			rf.state.rw.RUnlock()
+			DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
+			return -1
+		default:
+		}
 
 		if rf.state.indexExistWithNoLock(next) {
 			DTPrintf("%d: next exists\n", rf.me)
@@ -333,15 +378,29 @@ LOOP:
 		rf.state.rw.Lock()
 		DTPrintf("%d: for %d [LOCK] start processing Snapshot reply\n", rf.me, i)
 
+		select {
+		case <-done:
+			rf.state.rw.Unlock()
+			DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
+			return -1
+		default:
+		}
+
 		switch {
 		case reply.Term > term:
 			rf.state.CurrentTerm = reply.Term
 			rf.state.role = FOLLOWER
 			DTPrintf("%d: discovered new term\n", rf.me)
+			DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
+			rf.state.rw.Unlock()
+			DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
 			select {
 			case rf.appendReplyCh <- true:
+				DTPrintf("%d: FUCK!!\n", rf.me)
 			case <-done:
 			}
+
+			return ret
 
 		default:
 			// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.

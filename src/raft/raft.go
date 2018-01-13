@@ -94,8 +94,12 @@ func (rf *Raft) DiscardLogEnriesWithNoLock(index int) {
 	rf.state.discardLogEnriesWithNoLock(index)
 }
 
-func (rf *Raft) GetLogEntryTerm(index int) int {
-	return rf.state.getLogEntryTerm(index)
+func (rf *Raft) GetLogEntryTermWithNoLock(index int) int {
+	return rf.state.getLogEntryTermWithNoLock(index)
+}
+
+func (rf *Raft) IndexExistWithNoLock(index int) bool {
+	return rf.state.indexExistWithNoLock(index)
 }
 
 // return CurrentTerm and whether this server
@@ -134,11 +138,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	//defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
-	//defer DTPrintf("%d: done persist]]", rf.me)
+	defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
-	//defer DTPrintf("%d: [[start persist", rf.me)
+	defer DTPrintf("%d: [[start persist", rf.me)
+
+	DTPrintf("%d: get Request RPC args: %+v\n", rf.me, args)
 
 	resCh := <-rf.rpcCh
+
+	DTPrintf("%d: ###get resCh: %v\n", rf.me, resCh)
 
 	curTerm := rf.state.getCurrentTerm()
 	curVotedFor := rf.state.getVotedFor()
@@ -211,60 +219,85 @@ func min(a int, b int) int {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
-	//defer DTPrintf("%d: done persist]]", rf.me)
-	defer rf.state.persist(rf.persister)
-	//defer DTPrintf("%d: [[start persist", rf.me)
 
-	DTPrintf("%d get Append for term %d from leader. %+v\n", rf.me, args.Term, args)
+	DTPrintf("%d: get Append for term %d from leader. %+v\n", rf.me, args.Term, args)
 	defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
+
+	//defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
+	defer DTPrintf("%d: done persist]]", rf.me)
+	defer rf.state.persist(rf.persister)
+	defer DTPrintf("%d: [[start persist", rf.me)
 
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
 
-	curTerm := rf.state.getCurrentTerm()
+	rf.state.rw.Lock()
+	DTPrintf("%d: [LOCK] responding Append req part 1\n", rf.me)
+
+	curTerm := rf.state.CurrentTerm
 	resp := rpcResp{toFollower: false}
 	switch {
 	case args.Term > curTerm:
 		curTerm = args.Term
-		rf.state.setCurrentTerm(curTerm)
-		rf.state.setRole(FOLLOWER)
+		rf.state.CurrentTerm = curTerm
+		rf.state.role = FOLLOWER
 		resp.toFollower = true
+
 	case args.Term < curTerm:
 		reply.Term = curTerm
 		reply.Success = false
 		DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
 		// Did not receive RPC from *current* leader
 		resp.toFollower = false
+
+		rf.state.rw.Unlock()
+		DTPrintf("%d: [UNLOCK] responding Append req part 1\n", rf.me)
+
 		resCh <- resp
 		return
 	}
 
 	// At this point the role could only be FOLLOWER and CANDIDATE.
-	if rf.state.getRole() == LEADER {
+	if rf.state.role == LEADER {
 		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n",
 			args.Term, rf.me)
 		log.Fatal("In AppendEntriesReply Dead!")
 	}
 
-	rf.state.setRole(FOLLOWER)
+	rf.state.role = FOLLOWER
+	rf.state.rw.Unlock()
+	DTPrintf("%d: [UNLOCK] responding Append req part 1\n", rf.me)
 	resCh <- resp
 
+	rf.state.rw.Lock() // Lock!
+	DTPrintf("%d: [LOCK] responding Append req part 2\n", rf.me)
+
+	if rf.state.role != FOLLOWER {
+		rf.state.rw.Unlock()
+		DTPrintf("%d: [UNLOCK] responding Append req part 2\n", rf.me)
+		return
+	}
 	reply.Term = curTerm
-	logLen := rf.state.getLogLen()
+	logLen := rf.state.getLogLenWithNoLock()
+
+	updatedPrevLogIndex := args.PrevLogIndex
+	if args.PrevLogIndex < rf.state.lastIncludedEntryIndex {
+		updatedPrevLogIndex = rf.state.lastIncludedEntryIndex
+	}
 
 	switch {
-	case args.PrevLogIndex > logLen-1:
+	// XXX: Need to rethink
+	case updatedPrevLogIndex > logLen-1:
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
 
-	case rf.state.getLogEntryTerm(args.PrevLogIndex) != args.PrevLogTerm:
+	case rf.state.getLogEntryTermWithNoLock(updatedPrevLogIndex) != args.PrevLogTerm:
 		reply.Success = false
-		reply.ConflictTerm = rf.state.getLogEntryTerm(args.PrevLogIndex)
+		reply.ConflictTerm = rf.state.getLogEntryTermWithNoLock(updatedPrevLogIndex)
 		// find the first entry that has the conflicting term
 		streamDone := make(chan interface{})
-		for l := range rf.state.logEntryStream(streamDone) {
+		for l := range rf.state.logEntryStreamWithNoLock(streamDone) {
 			index, entry := l.index, l.entry
 			if entry.Term == reply.ConflictTerm {
 				reply.ConflictIndex = index
@@ -275,30 +308,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	default:
 		reply.Success = true
-		deleteIndex := args.PrevLogIndex + 1
+		deleteIndex := updatedPrevLogIndex + 1
 		for _, entry := range args.Entries {
 			switch {
 			case deleteIndex == logLen ||
-				rf.state.getLogEntryTerm(deleteIndex) != entry.Term:
+				rf.state.getLogEntryTermWithNoLock(deleteIndex) != entry.Term:
 				// delete conflicted entries
-				rf.state.rw.Lock()
 				rf.state.truncateLogWithNoLock(deleteIndex)
 				rf.state.appendLogEntriesWithNoLock(
-					args.Entries[deleteIndex-args.PrevLogIndex-1:])
-				DTPrintf("%d: append entries succeeds. log: %v\n", rf.me, rf.state.Log)
-				rf.state.rw.Unlock()
+					args.Entries[deleteIndex-updatedPrevLogIndex-1:])
 				break
 			default:
 				deleteIndex++
 			}
 		}
+		DTPrintf("%d: append entries succeeds. log: %v\n", rf.me, rf.state.Log)
 
-		lastNewEntryIndex := args.PrevLogIndex + len(args.Entries)
-		if args.LeaderCommit > rf.state.getCommitIndex() {
-			rf.state.setCommitIndex(min(args.LeaderCommit, lastNewEntryIndex))
+		lastNewEntryIndex := updatedPrevLogIndex + len(args.Entries)
+		if args.LeaderCommit > rf.state.commitIndex {
+			rf.state.commitIndex = min(args.LeaderCommit, lastNewEntryIndex)
 			go func() { rf.commit <- true }()
 		}
 	}
+	rf.state.rw.Unlock()
+	DTPrintf("%d: [UNLOCK] responding Append req part 2\n", rf.me)
 }
 
 type InstallSnapshotArgs struct {
@@ -314,19 +347,31 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+
+	DTPrintf("%d: get InstallSnapshot RPC args: %+v\n", rf.me, args)
+	defer DTPrintf("%d: reply InstallSnapshot RPC args: %+v\n", rf.me, args)
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	//defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
-
+	defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
+	defer DTPrintf("%d: [[start persist", rf.me)
 
 	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d, args.Term: %d\n",
 		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm, args.Term)
+
+	DTPrintf("%d: role: %d, is follower? %t\n", rf.me, rf.state.getRole(), rf.state.getRole() == FOLLOWER)
+
 	var resCh chan rpcResp
 	resCh = <-rf.rpcCh
 
+	DTPrintf("%d: ###get resCh: %v\n", rf.me, resCh)
+
 	term := rf.state.getCurrentTerm()
+
+	DTPrintf("%d: ###term: %d\n", rf.me, term)
 
 	resp := rpcResp{toFollower: false}
 	switch {
@@ -341,6 +386,7 @@ func (rf *Raft) InstallSnapshot(
 
 	case term > args.Term:
 		reply.Term = term
+		resCh <- resp
 		return
 	}
 
@@ -375,17 +421,28 @@ func (rf *Raft) commitLoop() {
 	for {
 		select {
 		case <-rf.commit:
-			commitIndex := rf.state.getCommitIndex()
-			lastApplied := rf.state.getLastApplied()
-			for commitIndex > lastApplied {
-				lastApplied++
-				rf.state.setLastApplied(lastApplied)
-				DTPrintf("%d: updated lastApplied: %d, logLen: %d\n",
-					rf.me, lastApplied, rf.state.getLogLen())
-				command := rf.state.getLogEntry(lastApplied).Command
-				rf.applyCh <- ApplyMsg{Index: lastApplied, Command: command}
+
+			entries := []ApplyMsg{}
+
+			rf.state.rw.Lock()
+			DTPrintf("%d: [LOCK] start commit\n", rf.me)
+
+			for rf.state.commitIndex > rf.state.lastApplied {
+				rf.state.lastApplied++
+				DTPrintf("%d: updated lastApplied to %d, log base: %d\n",
+					rf.me, rf.state.lastApplied, rf.state.logBase)
+				entries = append(entries, ApplyMsg{
+					Index:   rf.state.lastApplied,
+					Command: rf.state.getLogEntryWithNoLock(rf.state.lastApplied).Command})
+			}
+
+			rf.state.rw.Unlock()
+			DTPrintf("%d: [UNLOCK] finish commit\n", rf.me)
+
+			for _, entry := range entries {
+				rf.applyCh <- entry
 				DTPrintf("%d: applied the command %v at log index %d\n",
-					rf.me, command, lastApplied)
+					rf.me, entry.Command, entry.Index)
 			}
 		}
 	}

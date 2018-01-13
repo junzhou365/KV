@@ -27,12 +27,18 @@ func (rf *Raft) runCandidate() {
 	respCh := make(chan rpcResp)
 	votes := 1
 
+	becomeLeader := false
+	becomeFollower := false
+
+LOOP:
+
 	for {
 		select {
 		case rf.rpcCh <- respCh:
 			r := <-respCh
 			if r.toFollower {
-				return
+				becomeFollower = true
+				break LOOP
 			}
 
 		case reply := <-electionResCh:
@@ -40,17 +46,15 @@ func (rf *Raft) runCandidate() {
 				rf.me, reply, reply.index, reply.Term)
 			switch {
 			case reply.Term > term:
-				rf.state.setRole(FOLLOWER)
-				return
+				becomeFollower = true
+				break LOOP
 			case reply.VoteGranted:
 				votes++
 			}
 
 			if votes > len(rf.peers)/2 {
-				rf.state.setRole(LEADER)
-				DTPrintf("======= %d become a LEADER for term %d, log len: %d\n",
-					rf.me, term, rf.state.getLogLen())
-				return
+				becomeLeader = true
+				break LOOP
 			}
 
 		case <-electionTimeoutTimer:
@@ -58,6 +62,17 @@ func (rf *Raft) runCandidate() {
 			return
 		}
 	}
+
+	switch {
+	case becomeLeader:
+		rf.state.setRole(LEADER)
+		DTPrintf("======= %d become a LEADER for term %d, log len: %d\n",
+			rf.me, term, rf.state.getLogLen())
+
+	case becomeFollower:
+		rf.state.setRole(FOLLOWER)
+	}
+
 }
 
 func (rf *Raft) elect(done <-chan interface{}, term int) chan RequestVoteReply {

@@ -50,8 +50,7 @@ func (kv *RaftKV) serve() {
 		select {
 		case msg := <-msgStream:
 
-			lastTerm := kv.rf.GetLogEntryTerm(msg.Index)
-			kv.checkForTakingSnapshot(msg.Index, lastTerm)
+			kv.checkForTakingSnapshot(msg.Index)
 
 			select {
 			case req := <-kv.queue:
@@ -282,7 +281,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
-func (kv *RaftKV) checkForTakingSnapshot(lastIndex int, lastTerm int) {
+func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 	kv.state.rw.RLock()
 	defer kv.state.rw.RUnlock()
 
@@ -292,6 +291,14 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int, lastTerm int) {
 	defer rw.Unlock()
 
 	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
+		if !kv.rf.IndexExistWithNoLock(lastIndex) {
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				log.Fatal("leader lost snapshots")
+			}
+			DTPrintf("%d: new snapshot was given. Just return\n", kv.me)
+			return
+		}
+		lastTerm := kv.rf.GetLogEntryTermWithNoLock(lastIndex)
 		// we must first save snapshot
 		kv.takeSnapshotWithNoLock(lastIndex, lastTerm)
 		kv.rf.DiscardLogEnriesWithNoLock(lastIndex)
