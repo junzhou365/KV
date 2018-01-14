@@ -49,12 +49,10 @@ func (rf *Raft) runLeader() {
 
 		case <-heartbeatTimer:
 			heartbeatTimer = time.After(rf.heartbeatInterval)
-			DTPrintf("%d: signalCh len: %d\n", rf.me, len(signalCh))
 			signalCh <- -1
 
 		case index := <-rf.newEntry:
 			if index > last_seen_index {
-				DTPrintf("%d: signalCh len: %d\n", rf.me, len(signalCh))
 				signalCh <- index
 				last_seen_index = index
 			}
@@ -91,11 +89,11 @@ func (rf *Raft) appendNewEntries(
 		newIndex = rf.state.getLogLen() - 1
 	}
 
-	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
+	//DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
 	for i := 0; i < len(rf.peers); i++ {
 		next := rf.state.getNextIndex(i)
 		if !heartbeat && next > newIndex {
-			DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
+			//DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
 			continue
 		}
 
@@ -137,23 +135,23 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		newNext = rf.sendSnapshot(done, i, term, newNext)
 
 		rf.state.rw.RLock()
-		DTPrintf("%d: [RLOCK] for %d start processing Append req\n", rf.me, i)
+		//DTPrintf("%d: [RLOCK] for %d start processing Append req\n", rf.me, i)
 
 		if newNext < 0 || (!heartbeat && newNext > newIndex) {
 			DTPrintf("%d: for %d, newNext: %d, oldNext: %d, newIndex: %d. returning!!\n",
 				rf.me, i, newNext, oldNext, newIndex)
 
 			rf.state.rw.RUnlock()
-			DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
+			//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			return
 		}
 
-		DTPrintf("%d: for %d [RLOCK] start processing Append req\n", rf.me, i)
+		//DTPrintf("%d: for %d [RLOCK] start processing Append req\n", rf.me, i)
 
 		if !rf.state.indexExistWithNoLock(newNext) {
 			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 			rf.state.rw.RUnlock()
-			DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
+			//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			continue
 		}
 
@@ -163,8 +161,8 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 			PrevLogTerm:  rf.state.getLogEntryTermWithNoLock(newNext - 1),
 			LeaderCommit: rf.state.getCommitIndexWithNoLock()}
 
-		DTPrintf("%d: logLen: %d, prevLogIndex: %d, newIndex: %d for %d\n", rf.me,
-			rf.state.getLogLenWithNoLock(), newNext-1, newIndex, i)
+		//DTPrintf("%d: logLen: %d, prevLogIndex: %d, newIndex: %d for %d\n", rf.me,
+		//rf.state.getLogLenWithNoLock(), newNext-1, newIndex, i)
 
 		if !heartbeat {
 			args.Entries = append(args.Entries,
@@ -172,10 +170,10 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		}
 
 		rf.state.rw.RUnlock()
-		DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
+		//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
 		reply := new(AppendEntriesReply)
-		DTPrintf("%d sends Append RPC to %d for term %d. Args: %+v\n", rf.me, i, term, args)
+		//DTPrintf("%d sends Append RPC to %d for term %d. Args: %+v\n", rf.me, i, term, args)
 
 		ok := rf.peers[i].Call("Raft.AppendEntries", &args, reply)
 
@@ -186,7 +184,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		}
 
 		rf.state.rw.Lock()
-		DTPrintf("%d: [LOCK] for %d start processing Append reply\n", rf.me, i)
+		//DTPrintf("%d: [LOCK] for %d start processing Append reply\n", rf.me, i)
 
 		shouldReturn := false
 
@@ -197,7 +195,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		switch {
 		// Retry. Failed reply makes other cases meaningless
 		case !ok:
-			DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
+			//DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
 
 		case shouldReturn:
 			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
@@ -205,10 +203,10 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		case !reply.Success && reply.Term > term:
 			rf.state.CurrentTerm = reply.Term
 			rf.state.role = FOLLOWER
-			DTPrintf("%d: discovered new term\n", rf.me)
-			DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
+			//DTPrintf("%d: discovered new term\n", rf.me)
+			//DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
 			rf.state.rw.Unlock()
-			DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
+			//DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
 			select {
 			case rf.appendReplyCh <- true:
 			case <-done:
@@ -216,7 +214,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 			return
 
 		case !reply.Success && heartbeat:
-			DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
+			//DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
 			go rf.sendAppend(done, i, false, term, newNext, newIndex)
 			shouldReturn = true
 
@@ -224,7 +222,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 			// Follower doesn't have the entry with that term. len of
 			// follower's log is shorter than the leader's.
 			newNext = reply.ConflictIndex
-			DTPrintf("%d: conflict index: %d\n", rf.me, newNext)
+			//DTPrintf("%d: conflict index: %d\n", rf.me, newNext)
 
 		case !reply.Success && reply.ConflictTerm != -1:
 			// Find the last entry of the conflicting term. The conflicting
@@ -238,13 +236,13 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 			}
 
 			newNext = j + 1
-			DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
+			//DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
 
 		case reply.Success && heartbeat:
 			nnewIndex := rf.state.getLogLenWithNoLock() - 1
 			nnextIndex := rf.state.getNextIndexWithNoLock(i)
 			if nnewIndex >= nnextIndex {
-				DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
+				//DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
 				go rf.sendAppend(done, i, false, term, nnextIndex, nnewIndex)
 			}
 			shouldReturn = true
@@ -252,7 +250,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		case reply.Success:
 			iMatch := args.PrevLogIndex + len(args.Entries)
 			rf.state.setMatchIndexWithNoLock(i, iMatch)
-			DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+			//DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
 
 			iNext := newNext + len(args.Entries)
 			rf.state.setNextIndexWithNoLock(i, iNext)
@@ -267,7 +265,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		}
 
 		rf.state.rw.Unlock()
-		DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
+		//DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
 		if shouldReturn {
 			return
 		}
@@ -280,8 +278,8 @@ func (rf *Raft) updateCommitIndexWithNoLock(term int) {
 	//defer DTPrintf("%d: [UNLOCK] finish processing update commit\n", rf.me)
 	//defer rf.state.rw.Unlock()
 
-	DTPrintf("%d: try update commitIndex for term %d. orig commitIndex: %d\n",
-		rf.me, term, rf.state.commitIndex)
+	//DTPrintf("%d: try update commitIndex for term %d. orig commitIndex: %d\n",
+	//rf.me, term, rf.state.commitIndex)
 
 	logLen := rf.state.getLogLenWithNoLock()
 	for n := logLen - 1; n > rf.state.commitIndex; n-- {
@@ -292,7 +290,7 @@ func (rf *Raft) updateCommitIndexWithNoLock(term int) {
 				count++
 			}
 		}
-		DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
+		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
 		if count > len(rf.peers)/2 && n > rf.state.commitIndex &&
 			term == rf.state.getLogEntryTermWithNoLock(n) {
 			rf.state.commitIndex = n
@@ -328,12 +326,12 @@ func (rf *Raft) sendSnapshot(done <-chan interface{}, i int, term int, next int)
 LOOP:
 	for {
 		rf.state.rw.RLock()
-		DTPrintf("%d: for %d [RLOCK] start processing Snapshot req\n", rf.me, i)
+		//DTPrintf("%d: for %d [RLOCK] start processing Snapshot req\n", rf.me, i)
 
 		select {
 		case <-done:
 			rf.state.rw.RUnlock()
-			DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
+			//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
 			return -1
 		default:
 		}
@@ -341,7 +339,7 @@ LOOP:
 		if rf.state.indexExistWithNoLock(next) {
 			DTPrintf("%d: next exists\n", rf.me)
 			rf.state.rw.RUnlock()
-			DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
+			//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
 			return next
 		}
 
@@ -359,7 +357,7 @@ LOOP:
 			rf.me, i, args.LastIncludedEntryIndex)
 
 		rf.state.rw.RUnlock()
-		DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
+		//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
 
 		ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
 
@@ -376,12 +374,12 @@ LOOP:
 		ret := -1
 
 		rf.state.rw.Lock()
-		DTPrintf("%d: for %d [LOCK] start processing Snapshot reply\n", rf.me, i)
+		//DTPrintf("%d: for %d [LOCK] start processing Snapshot reply\n", rf.me, i)
 
 		select {
 		case <-done:
 			rf.state.rw.Unlock()
-			DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
+			//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
 			return -1
 		default:
 		}
@@ -390,13 +388,13 @@ LOOP:
 		case reply.Term > term:
 			rf.state.CurrentTerm = reply.Term
 			rf.state.role = FOLLOWER
-			DTPrintf("%d: discovered new term\n", rf.me)
-			DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
+			//DTPrintf("%d: discovered new term\n", rf.me)
+			//DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
 			rf.state.rw.Unlock()
-			DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
+			//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
 			select {
 			case rf.appendReplyCh <- true:
-				DTPrintf("%d: FUCK!!\n", rf.me)
+				//DTPrintf("%d: FUCK!!\n", rf.me)
 			case <-done:
 			}
 
@@ -413,7 +411,7 @@ LOOP:
 		}
 
 		rf.state.rw.Unlock()
-		DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
+		//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
 		return ret
 	}
 }

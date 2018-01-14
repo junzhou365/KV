@@ -55,7 +55,7 @@ func (kv *RaftKV) serve() {
 			select {
 			case req := <-kv.queue:
 				index := msg.Index
-				DTPrintf("%d: new req %+v, msg is %+v\n", kv.me, req, msg)
+				DTPrintf("%d: new req %+v, msg index is %d\n", kv.me, req, index)
 
 				// Leader role was lost
 				switch term, _ := kv.rf.GetState(); {
@@ -70,7 +70,7 @@ func (kv *RaftKV) serve() {
 					log.Fatal("req.index < index")
 				}
 			default:
-				DTPrintf("%d: drain the msg %d\n", kv.me, msg.Index)
+				DTPrintf("%d: drain the msg %d because there's no reqs\n", kv.me, msg.Index)
 			}
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -102,14 +102,8 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 				continue
 			}
 
-			switch {
-			case msg.Snapshot != nil:
-				kv.saveSnapshot(msg.Snapshot)
-				close(msg.SavedCh)
-				continue
-
-			case msg.UseSnapshot:
-				kv.restoreSnapshot()
+			if msg.Snapshot != nil {
+				kv.saveOrRestoreSnapshot(msg.Snapshot, msg.UseSnapshot)
 				close(msg.SavedCh)
 				continue
 			}
@@ -120,7 +114,7 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 			// Duplicate Op
 			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
 				msg.Command = resOp
-				DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
+				//DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
 				msgStream <- msg
 				continue
 			}
@@ -138,7 +132,7 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 
 			kv.state.setDup(op.ClientId, op)
 			msg.Command = op
-			DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
+			//DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
 			msgStream <- msg
 		}
 	}()
@@ -165,7 +159,7 @@ func (kv *RaftKV) commitOperation(op Op) interface{} {
 	kv.mu.Unlock()
 
 	cmd := <-req.resCh
-	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
+	//DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
 	if cmd == nil {
 		return Err("Leader role lost")
 	}
@@ -271,7 +265,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.queue = make(chan *Request, kv.maxRequests)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.restoreSnapshot()
+	kv.saveOrRestoreSnapshot(kv.readSnapshot(), true)
 
 	// You may need initialization code here.
 	go kv.serve()

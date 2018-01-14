@@ -81,7 +81,7 @@ func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
 	case offsettedLastIndex < 0 || offsettedLastIndex >= len(rs.Log):
 		DTPrintf("%d: logBase: %d, offset: %d\n", rs.me, rs.logBase, offsettedLastIndex)
 	case offsettedLastIndex == 0:
-		DTPrintf("%d: logBase: %d, lastTerm: %d\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
+		DTPrintf("%d: logBase: %d, lastTerm: %d in getLogEntryTermWithNoLock\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
 		return rs.lastIncludedEntryTerm
 	}
 
@@ -148,7 +148,6 @@ func (rs *RaftState) truncateLogWithNoLock(deleteIndex int) {
 // return last log entry index
 func (rs *RaftState) appendLogEntriesWithNoLock(entries []RaftLogEntry) int {
 	rs.Log = append(rs.Log, entries...)
-	DTPrintf("%d: after append, log: %v\n", rs.me, rs.Log)
 	return len(rs.Log) + rs.logBase - 1
 }
 
@@ -166,12 +165,16 @@ func (rs *RaftState) getLogRangeWithNoLock(start int, end int) []RaftLogEntry {
 
 // Discard log entries up to the lastIndex
 func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
+	if lastIndex == -1 {
+		lastIndex = rs.getLogLenWithNoLock() - 1
+	}
 	// Keep the nil head
 	rs.lastIncludedEntryIndex = lastIndex
 	rs.lastIncludedEntryTerm = rs.getLogEntryTermWithNoLock(lastIndex)
 
 	rs.Log = append(rs.Log[0:1], rs.Log[lastIndex+1-rs.logBase:]...)
 	rs.logBase = lastIndex
+	DTPrintf("%d: logBase changed to %d in discard\n", rs.me, lastIndex)
 }
 
 // Discard log entries up to the lastIndex
@@ -182,14 +185,12 @@ func (rs *RaftState) discardLogEnries(lastIndex int) {
 	rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
-func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
-
+func (rs *RaftState) loadSnapshotMetaDataWithNoLock(index int, term int) {
 	rs.lastIncludedEntryIndex = index
 	rs.lastIncludedEntryTerm = term
 
 	rs.logBase = index
+	DTPrintf("%d: logBase changed to %d in load\n", rs.me, index)
 
 	rs.lastApplied = index
 	rs.commitIndex = index

@@ -22,26 +22,42 @@ func (kv *RaftKV) takeSnapshotWithNoLock(lastIndex int, lastTerm int) {
 	kv.persister.SaveSnapshot(snapshot)
 }
 
-func (kv *RaftKV) restoreSnapshot() {
-	snapshot := kv.readSnapshot()
+func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
+	kv.state.rw.Lock()
+	defer kv.state.rw.Unlock()
 
 	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+
+	kv.persister.SaveSnapshot(snapshot)
+
+	prw := kv.rf.GetPersisterLock()
+	prw.Lock()
+	defer prw.Unlock()
+
+	r := bytes.NewBuffer(snapshot)
+	d := gob.NewDecoder(r)
+
+	var lastEntryIndex int
+	d.Decode(&lastEntryIndex)
+
+	var lastEntryTerm int
+	d.Decode(&lastEntryTerm)
+
+	if !use {
+		// snapshot might have been taken before this
+		if kv.rf.IndexExistWithNoLock(lastEntryIndex) {
+			kv.rf.DiscardLogEnriesWithNoLock(lastEntryIndex)
+			DTPrintf("%d: only discard entries up to %d\n", kv.me, lastEntryIndex)
+		}
 	} else {
-		r := bytes.NewBuffer(snapshot)
-		d := gob.NewDecoder(r)
+		kv.rf.DiscardLogEnriesWithNoLock(-1)
 
-		var lastEntryIndex int
-		d.Decode(&lastEntryIndex)
-
-		var lastEntryTerm int
-		d.Decode(&lastEntryTerm)
-
-		kv.state.rw.Lock()
 		d.Decode(&kv.state.Table)
 		d.Decode(&kv.state.Duplicates)
-		kv.state.rw.Unlock()
 
-		kv.rf.LoadSnapshotMetaData(lastEntryIndex, lastEntryTerm)
+		kv.rf.LoadSnapshotMetaDataWithNoLock(lastEntryIndex, lastEntryTerm)
 		DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
 			kv.me, lastEntryIndex, lastEntryTerm)
 	}
