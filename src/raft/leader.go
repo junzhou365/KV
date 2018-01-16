@@ -128,6 +128,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 	newNext := next
 	oldNext := newNext
 
+LOOP:
 	for {
 		// If unable to send AppendRPC due to [next:lastIndex] are gone, send
 		// Snapshot instead.
@@ -156,9 +157,14 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		default:
 		}
 
+		// Retry. Failed reply makes other cases meaningless
+		if !ok {
+			continue LOOP
+		}
+
 		shouldReturn, newEntries := false, false
 		shouldReturn, newEntries, newIndex, newNext =
-			rf.processAppendReply(done, reply, ok, heartbeat, i, args, term, newIndex, newNext)
+			rf.processAppendReply(done, reply, heartbeat, i, args, term, newIndex, newNext)
 
 		if newEntries {
 			go rf.sendAppend(done, i, false, term, newIndex, newIndex)
@@ -224,39 +230,15 @@ func (rf *Raft) updateCommitIndexWithNoLock(term int) {
 func (rf *Raft) sendSnapshot(done <-chan interface{}, i int, term int, next int) int {
 LOOP:
 	for {
-		rf.state.rw.RLock()
-		//DTPrintf("%d: for %d [RLOCK] start processing Snapshot req\n", rf.me, i)
+		args := rf.getSnapshotArgs(term, next)
 
-		select {
-		case <-done:
-			rf.state.rw.RUnlock()
-			//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
-			return -1
-		default:
-		}
-
-		if rf.state.indexExistWithNoLock(next) {
-			DTPrintf("%d: next exists\n", rf.me)
-			rf.state.rw.RUnlock()
-			//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
+		if args == nil {
 			return next
 		}
 
-		lastIndex := rf.state.getLastIndexWithNoLock()
-		lastTerm := rf.state.getLastTermWithNoLock()
-		args := &InstallSnapshotArgs{
-			Term: term,
-			LastIncludedEntryIndex: lastIndex,
-			LastIncludedEntryTerm:  lastTerm,
-			Data: rf.persister.ReadSnapshot()}
-
 		reply := &InstallSnapshotReply{}
-
 		DTPrintf("%d: send Snapshot to %d, lastIndex: %d\n",
 			rf.me, i, args.LastIncludedEntryIndex)
-
-		rf.state.rw.RUnlock()
-		//DTPrintf("%d: for %d [RUNLOCK] finish processing Snapshot req\n", rf.me, i)
 
 		ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
 
@@ -302,7 +284,7 @@ LOOP:
 
 		default:
 			// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
-			rf.state.setMatchIndexWithNoLock(i, lastIndex)
+			rf.state.setMatchIndexWithNoLock(i, args.LastIncludedEntryIndex)
 
 			iMatch := rf.state.getMatchIndexWithNoLock(i)
 			rf.state.setNextIndexWithNoLock(i, iMatch+1)
@@ -348,7 +330,7 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 }
 
 func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntriesReply,
-	ok bool, heartbeat bool, i int, args *AppendEntriesArgs, term int, newIndex int, newNext int) (
+	heartbeat bool, i int, args *AppendEntriesArgs, term int, newIndex int, newNext int) (
 	shouldReturn bool, newEntries bool, nnewIndex int, nnewNext int) {
 
 	req := StateRequest{done: make(chan interface{})}
@@ -367,10 +349,6 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	}
 
 	switch {
-	// Retry. Failed reply makes other cases meaningless
-	case !ok:
-		//DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
-
 	case shouldReturn:
 		// Pass through
 
@@ -439,4 +417,30 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	}
 
 	return shouldReturn, newEntries, nnewIndex, nnewNext
+}
+
+func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) {
+
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
+
+	rf.state.rw.RLock()
+	defer rf.state.rw.RUnlock()
+
+	if rf.state.indexExistWithNoLock(next) {
+		DTPrintf("%d: next exists\n", rf.me)
+		return nil
+	}
+
+	lastIndex := rf.state.getLastIndexWithNoLock()
+	lastTerm := rf.state.getLastTermWithNoLock()
+
+	args = &InstallSnapshotArgs{
+		Term: term,
+		LastIncludedEntryIndex: lastIndex,
+		LastIncludedEntryTerm:  lastTerm,
+		Data: rf.persister.ReadSnapshot()}
+
+	return args
 }
