@@ -26,57 +26,51 @@ func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 	kv.state.rw.Lock()
 	defer kv.state.rw.Unlock()
 
+	if snapshot == nil { // bootstrap
+		snapshot = kv.persister.ReadSnapshot()
+	}
+
 	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
 		return
 	}
 
 	kv.persister.SaveSnapshot(snapshot)
 
-	prw := kv.rf.GetPersisterLock()
-	prw.Lock()
-	defer prw.Unlock()
+	restoreSnapshot := func() {
+		req := StateRequest{done: make(chan interface{})}
+		rf.state.queue <- req
+		defer close(req.done)
 
-	r := bytes.NewBuffer(snapshot)
-	d := gob.NewDecoder(r)
+		prw := kv.rf.GetPersisterLock()
+		prw.Lock()
+		defer prw.Unlock()
 
-	var lastEntryIndex int
-	d.Decode(&lastEntryIndex)
+		r := bytes.NewBuffer(snapshot)
+		d := gob.NewDecoder(r)
 
-	var lastEntryTerm int
-	d.Decode(&lastEntryTerm)
+		var lastEntryIndex int
+		d.Decode(&lastEntryIndex)
 
-	if !use {
-		// snapshot might have been taken before this
-		if kv.rf.IndexExistWithNoLock(lastEntryIndex) {
-			kv.rf.DiscardLogEnriesWithNoLock(lastEntryIndex)
-			DTPrintf("%d: only discard entries up to %d\n", kv.me, lastEntryIndex)
+		var lastEntryTerm int
+		d.Decode(&lastEntryTerm)
+
+		if !use {
+			// snapshot might have been taken before this
+			if kv.rf.IndexExistWithNoLock(lastEntryIndex) {
+				kv.rf.DiscardLogEnriesWithNoLock(lastEntryIndex)
+				DTPrintf("%d: only discard entries up to %d\n", kv.me, lastEntryIndex)
+			}
+		} else {
+			kv.rf.DiscardLogEnriesWithNoLock(-1)
+
+			d.Decode(&kv.state.Table)
+			d.Decode(&kv.state.Duplicates)
+
+			kv.rf.LoadSnapshotMetaDataWithNoLock(lastEntryIndex, lastEntryTerm)
+			DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
+				kv.me, lastEntryIndex, lastEntryTerm)
 		}
-	} else {
-		kv.rf.DiscardLogEnriesWithNoLock(-1)
-
-		d.Decode(&kv.state.Table)
-		d.Decode(&kv.state.Duplicates)
-
-		kv.rf.LoadSnapshotMetaDataWithNoLock(lastEntryIndex, lastEntryTerm)
-		DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
-			kv.me, lastEntryIndex, lastEntryTerm)
 	}
-}
 
-func (kv *RaftKV) saveSnapshot(snapshot []byte) {
-	rw := kv.rf.GetPersisterLock()
-
-	rw.Lock()
-	defer rw.Unlock()
-
-	kv.persister.SaveSnapshot(snapshot)
-}
-
-func (kv *RaftKV) readSnapshot() []byte {
-	rw := kv.rf.GetPersisterLock()
-
-	rw.Lock()
-	defer rw.Unlock()
-
-	return kv.persister.ReadSnapshot()
+	restoreSnapshot()
 }

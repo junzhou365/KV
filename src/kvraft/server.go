@@ -321,7 +321,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.reqs = make(chan *Request)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.saveOrRestoreSnapshot(kv.readSnapshot(), true)
+	kv.saveOrRestoreSnapshot(nil, true)
 
 	// You may need initialization code here.
 	go kv.run()
@@ -336,26 +336,34 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 	kv.state.rw.RLock()
 	defer kv.state.rw.RUnlock()
 
-	// RaftStateSize should have a consistent view
-	rw := kv.rf.GetPersisterLock()
-	rw.Lock()
-	defer rw.Unlock()
+	checkSnapshotForRaft := func() {
+		// RaftStateSize should have a consistent view
+		req := StateRequest{done: make(chan interface{})}
+		rf.state.queue <- req
+		defer close(req.done)
 
-	DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
+		rw := kv.rf.GetPersisterLock()
+		rw.Lock()
+		defer rw.Unlock()
 
-	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
-		if !kv.rf.IndexValidWithNoLock(lastIndex) {
-			if _, isLeader := kv.rf.GetStateWithNoLock(); isLeader {
-				log.Fatal("leader lost snapshots")
+		DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
+
+		if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
+			if !kv.rf.IndexValidWithNoLock(lastIndex) {
+				if _, isLeader := kv.rf.GetStateWithNoLock(); isLeader {
+					log.Fatal("leader lost snapshots")
+				}
+				DTPrintf("%d: new snapshot was given. Just return\n", kv.me)
+				return
 			}
-			DTPrintf("%d: new snapshot was given. Just return\n", kv.me)
-			return
-		}
 
-		DTPrintf("%d: take snapshot\n", kv.me)
-		lastTerm := kv.rf.GetLogEntryTermWithNoLock(lastIndex)
-		// we must first save snapshot
-		kv.takeSnapshotWithNoLock(lastIndex, lastTerm)
-		kv.rf.DiscardLogEnriesWithNoLock(lastIndex)
+			DTPrintf("%d: take snapshot\n", kv.me)
+			lastTerm := kv.rf.GetLogEntryTermWithNoLock(lastIndex)
+			// we must first save snapshot
+			kv.takeSnapshotWithNoLock(lastIndex, lastTerm)
+			kv.rf.DiscardLogEnriesWithNoLock(lastIndex)
+		}
 	}
+
+	checkSnapshotForRaft()
 }

@@ -148,8 +148,10 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
+
 	//defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
 	//defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
@@ -228,8 +230,9 @@ func min(a int, b int) int {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
 
 	//DTPrintf("%d: get Append for term %d from leader. %+v\n", rf.me, args.Term, args)
 	//defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
@@ -362,8 +365,9 @@ func (rf *Raft) InstallSnapshot(
 	//DTPrintf("%d: get InstallSnapshot RPC args: %+v\n", rf.me, args)
 	//defer DTPrintf("%d: reply InstallSnapshot RPC args: %d\n", rf.me, args.LastIncludedEntryIndex)
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
 
 	//defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
 	//defer DTPrintf("%d: done persist]]", rf.me)
