@@ -134,17 +134,11 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		oldNext = newNext
 		newNext = rf.sendSnapshot(done, i, term, newNext)
 
-		//DTPrintf("%d: [RLOCK] for %d start processing Append req\n", rf.me, i)
-
 		if newNext < 0 || (!heartbeat && newNext > newIndex) {
 			DTPrintf("%d: for %d, newNext: %d, oldNext: %d, newIndex: %d. returning!!\n",
 				rf.me, i, newNext, oldNext, newIndex)
-
-			//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			return
 		}
-
-		//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
 		args := rf.getAppendArgs(newNext, newIndex, term, heartbeat)
 		if args == nil {
@@ -162,88 +156,14 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		default:
 		}
 
-		rf.state.rw.Lock()
-		//DTPrintf("%d: [LOCK] for %d start processing Append reply\n", rf.me, i)
+		shouldReturn, newEntries := false, false
+		shouldReturn, newEntries, newIndex, newNext =
+			rf.processAppendReply(done, reply, ok, heartbeat, i, args, term, newIndex, newNext)
 
-		shouldReturn := false
-
-		if !heartbeat && !rf.state.indexExistWithNoLock(newIndex+1) {
-			shouldReturn = true
+		if newEntries {
+			go rf.sendAppend(done, i, false, term, newIndex, newIndex)
 		}
 
-		switch {
-		// Retry. Failed reply makes other cases meaningless
-		case !ok:
-			//DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
-
-		case shouldReturn:
-			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
-
-		case !reply.Success && reply.Term > term:
-			rf.state.CurrentTerm = reply.Term
-			rf.state.role = FOLLOWER
-			//DTPrintf("%d: discovered new term\n", rf.me)
-			//DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
-			rf.state.rw.Unlock()
-			//DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
-			select {
-			case rf.appendReplyCh <- true:
-			case <-done:
-			}
-			return
-
-		case !reply.Success && heartbeat:
-			//DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
-			go rf.sendAppend(done, i, false, term, newNext, newIndex)
-			shouldReturn = true
-
-		case !reply.Success && reply.ConflictTerm == -1:
-			// Follower doesn't have the entry with that term. len of
-			// follower's log is shorter than the leader's.
-			newNext = reply.ConflictIndex
-			//DTPrintf("%d: conflict index: %d\n", rf.me, newNext)
-
-		case !reply.Success && reply.ConflictTerm != -1:
-			// Find the last entry of the conflicting term. The conflicting
-			// server will delete all entries after this new newNext
-			j := newIndex
-			// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
-			for ; j > 0; j-- {
-				if rf.state.getLogEntryTermWithNoLock(j) == reply.ConflictTerm {
-					break
-				}
-			}
-
-			newNext = j + 1
-			//DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
-
-		case reply.Success && heartbeat:
-			nnewIndex := rf.state.getLogLenWithNoLock() - 1
-			nnextIndex := rf.state.getNextIndexWithNoLock(i)
-			if nnewIndex >= nnextIndex {
-				//DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
-				go rf.sendAppend(done, i, false, term, nnextIndex, nnewIndex)
-			}
-			shouldReturn = true
-
-		case reply.Success:
-			iMatch := args.PrevLogIndex + len(args.Entries)
-			rf.state.setMatchIndexWithNoLock(i, iMatch)
-			//DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
-
-			iNext := newNext + len(args.Entries)
-			rf.state.setNextIndexWithNoLock(i, iNext)
-
-			rf.updateCommitIndexWithNoLock(term)
-
-			shouldReturn = true
-
-		default:
-			DTPrintf("!!! reply: %v, term: %d\n", reply, term)
-			log.Fatal("!!! Incorrect Append RPC reply")
-		}
-
-		rf.state.rw.Unlock()
 		//DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
 		if shouldReturn {
 			return
@@ -425,4 +345,98 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	}
 
 	return args
+}
+
+func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntriesReply,
+	ok bool, heartbeat bool, i int, args *AppendEntriesArgs, term int, newIndex int, newNext int) (
+	shouldReturn bool, newEntries bool, nnewIndex int, nnewNext int) {
+
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
+
+	rf.state.rw.Lock()
+	defer rf.state.rw.Unlock()
+
+	shouldReturn, newEntries = false, false
+	nnewIndex, nnewNext = newIndex, newNext
+
+	if !heartbeat && !rf.state.indexExistWithNoLock(newIndex+1) {
+		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
+		shouldReturn = true
+	}
+
+	switch {
+	// Retry. Failed reply makes other cases meaningless
+	case !ok:
+		//DTPrintf("%d: Append RPC failed for %d\n", rf.me, i)
+
+	case shouldReturn:
+		// Pass through
+
+	case !reply.Success && reply.Term > term:
+		rf.state.CurrentTerm = reply.Term
+		rf.state.role = FOLLOWER
+
+		rf.state.rw.Unlock()
+		select {
+		case rf.appendReplyCh <- true:
+		case <-done:
+		}
+		rf.state.rw.Lock()
+
+	case !reply.Success && heartbeat:
+		//DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
+		newEntries = true
+		//go rf.sendAppend(done, i, false, term, newNext, newIndex)
+		shouldReturn = true
+
+	case !reply.Success && reply.ConflictTerm == -1:
+		// Follower doesn't have the entry with that term. len of
+		// follower's log is shorter than the leader's.
+		nnewNext = reply.ConflictIndex
+		//DTPrintf("%d: conflict index: %d\n", rf.me, newNext)
+
+	case !reply.Success && reply.ConflictTerm != -1:
+		// Find the last entry of the conflicting term. The conflicting
+		// server will delete all entries after this new newNext
+		j := newIndex
+		// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
+		for ; j > 0; j-- {
+			if rf.state.getLogEntryTermWithNoLock(j) == reply.ConflictTerm {
+				break
+			}
+		}
+
+		nnewNext = j + 1
+		//DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
+
+	case reply.Success && heartbeat:
+		nnewIndex = rf.state.getLogLenWithNoLock() - 1
+		nnewNext = rf.state.getNextIndexWithNoLock(i)
+		if nnewIndex >= nnewNext {
+			//DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
+			//go rf.sendAppend(done, i, false, term, nnewNe, nnewIndex)
+			newEntries = true
+		}
+		shouldReturn = true
+
+	case reply.Success:
+		iMatch := args.PrevLogIndex + len(args.Entries)
+		rf.state.setMatchIndexWithNoLock(i, iMatch)
+		//DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+
+		iNext := newNext + len(args.Entries)
+		rf.state.setNextIndexWithNoLock(i, iNext)
+
+		rf.updateCommitIndexWithNoLock(term)
+
+		shouldReturn = true
+
+	default:
+		DTPrintf("!!! reply: %v, term: %d\n", reply, term)
+		log.Fatal("!!! Incorrect Append RPC reply")
+	}
+
+	return shouldReturn, newEntries, nnewIndex, nnewNext
 }
