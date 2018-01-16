@@ -553,6 +553,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	go rf.run()
 	go rf.commitLoop()
+	go rf.state.stateLoop()
 	DTPrintf("%d is created, log len: %d\n", rf.me, rf.state.getLogLen())
 
 	return rf

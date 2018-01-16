@@ -26,6 +26,11 @@ type RaftState struct {
 
 	lastIncludedEntryIndex int
 	lastIncludedEntryTerm  int
+
+	queue chan StateRequest
+}
+type StateRequest struct {
+	done chan interface{}
 }
 
 type RaftLogEntry struct {

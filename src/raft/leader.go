@@ -134,48 +134,27 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 		oldNext = newNext
 		newNext = rf.sendSnapshot(done, i, term, newNext)
 
-		rf.state.rw.RLock()
 		//DTPrintf("%d: [RLOCK] for %d start processing Append req\n", rf.me, i)
 
 		if newNext < 0 || (!heartbeat && newNext > newIndex) {
 			DTPrintf("%d: for %d, newNext: %d, oldNext: %d, newIndex: %d. returning!!\n",
 				rf.me, i, newNext, oldNext, newIndex)
 
-			rf.state.rw.RUnlock()
 			//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 			return
 		}
 
-		//DTPrintf("%d: for %d [RLOCK] start processing Append req\n", rf.me, i)
+		//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
-		if !rf.state.indexExistWithNoLock(newNext) {
-			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
-			rf.state.rw.RUnlock()
-			//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
+		args := rf.state.getAppendArgs(newNext, newIndex, term, heartbeat)
+		if args == nil {
 			continue
 		}
-
-		args := AppendEntriesArgs{
-			Term:         term,
-			PrevLogIndex: newNext - 1,
-			PrevLogTerm:  rf.state.getLogEntryTermWithNoLock(newNext - 1),
-			LeaderCommit: rf.state.getCommitIndexWithNoLock()}
-
-		//DTPrintf("%d: logLen: %d, prevLogIndex: %d, newIndex: %d for %d\n", rf.me,
-		//rf.state.getLogLenWithNoLock(), newNext-1, newIndex, i)
-
-		if !heartbeat {
-			args.Entries = append(args.Entries,
-				rf.state.getLogRangeWithNoLock(newNext, newIndex+1)...)
-		}
-
-		rf.state.rw.RUnlock()
-		//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
 		reply := new(AppendEntriesReply)
 		//DTPrintf("%d sends Append RPC to %d for term %d. Args: %+v\n", rf.me, i, term, args)
 
-		ok := rf.peers[i].Call("Raft.AppendEntries", &args, reply)
+		ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 
 		select {
 		case <-done:
