@@ -537,6 +537,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.state.me = me
+	rf.state.queue = make(chan StateRequest)
 
 	// Your initialization code here (2A, 2B, 2C).
 	// initialize from state persisted before a crash
@@ -551,9 +552,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commit = make(chan bool)
 	rf.applyCh = applyCh
 
+	go rf.state.stateLoop()
 	go rf.run()
 	go rf.commitLoop()
-	go rf.state.stateLoop()
 	DTPrintf("%d is created, log len: %d\n", rf.me, rf.state.getLogLen())
 
 	return rf
