@@ -253,49 +253,7 @@ LOOP:
 			continue LOOP
 		}
 
-		ret := -1
-
-		rf.state.rw.Lock()
-		//DTPrintf("%d: for %d [LOCK] start processing Snapshot reply\n", rf.me, i)
-
-		select {
-		case <-done:
-			rf.state.rw.Unlock()
-			//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
-			return -1
-		default:
-		}
-
-		switch {
-		case reply.Term > term:
-			rf.state.CurrentTerm = reply.Term
-			rf.state.role = FOLLOWER
-			//DTPrintf("%d: discovered new term\n", rf.me)
-			//DTPrintf("%d: is appendCh nil? %v\n", rf.me, rf.appendReplyCh)
-			rf.state.rw.Unlock()
-			//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
-			select {
-			case rf.appendReplyCh <- true:
-				//DTPrintf("%d: FUCK!!\n", rf.me)
-			case <-done:
-			}
-
-			return ret
-
-		default:
-			// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
-			rf.state.setMatchIndexWithNoLock(i, args.LastIncludedEntryIndex)
-
-			iMatch := rf.state.getMatchIndexWithNoLock(i)
-			rf.state.setNextIndexWithNoLock(i, iMatch+1)
-
-			ret = iMatch + 1
-			DTPrintf("%d: in snapshot set next to %d\n", rf.me, rf.state.getNextIndexWithNoLock(i))
-		}
-
-		rf.state.rw.Unlock()
-		//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
-		return ret
+		return rf.processSnapshotReply(done, reply, i, args)
 	}
 }
 
@@ -443,4 +401,43 @@ func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) 
 		Data: rf.persister.ReadSnapshot()}
 
 	return args
+}
+
+func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnapshotReply,
+	i int, args *InstallSnapshotArgs) (ret int) {
+
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
+
+	rf.state.rw.Lock()
+	defer rf.state.rw.Unlock()
+
+	ret = -1
+
+	switch {
+	case reply.Term > args.Term:
+		rf.state.CurrentTerm = reply.Term
+		rf.state.role = FOLLOWER
+		//DTPrintf("%d: discovered new term\n", rf.me)
+		rf.state.rw.Unlock()
+		select {
+		case rf.appendReplyCh <- true:
+		case <-done:
+		}
+		rf.state.rw.Lock()
+
+	default:
+		// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
+		rf.state.setMatchIndexWithNoLock(i, args.LastIncludedEntryIndex)
+
+		iMatch := rf.state.getMatchIndexWithNoLock(i)
+		rf.state.setNextIndexWithNoLock(i, iMatch+1)
+
+		ret = iMatch + 1
+		DTPrintf("%d: in snapshot set next to %d\n", rf.me, rf.state.getNextIndexWithNoLock(i))
+	}
+
+	return ret
+
 }
