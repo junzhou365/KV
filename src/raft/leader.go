@@ -177,34 +177,6 @@ LOOP:
 	}
 }
 
-func (rf *Raft) updateCommitIndexWithNoLock(term int) {
-	//rf.state.rw.Lock()
-	//DTPrintf("%d: [LOCK] start processing update commit\n", rf.me)
-	//defer DTPrintf("%d: [UNLOCK] finish processing update commit\n", rf.me)
-	//defer rf.state.rw.Unlock()
-
-	//DTPrintf("%d: try update commitIndex for term %d. orig commitIndex: %d\n",
-	//rf.me, term, rf.state.commitIndex)
-
-	logLen := rf.state.getLogLenWithNoLock()
-	for n := logLen - 1; n > rf.state.commitIndex; n-- {
-		count := 1
-		for j := 0; j < len(rf.peers); j++ {
-			if j != rf.me && rf.state.matchIndexes[j] >= n {
-				//DTPrintf("%d: find %d's match %d >= n %d", rf.me, j, rf.state.matchIndexes[j], n)
-				count++
-			}
-		}
-		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		if count > len(rf.peers)/2 && n > rf.state.commitIndex &&
-			term == rf.state.getLogEntryTermWithNoLock(n) {
-			rf.state.commitIndex = n
-			go func() { rf.commit <- true }()
-			return
-		}
-	}
-}
-
 //type sendJob struct {
 //i         int
 //heartbeat bool
@@ -264,11 +236,7 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	rf.state.queue <- req
 	defer close(req.done)
 
-	// XXX: will be removed
-	rf.state.rw.RLock()
-	defer rf.state.rw.RUnlock()
-
-	if !rf.state.indexExistWithNoLock(newNext) {
+	if !rf.state.indexExist(newNext) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 		return nil
 	}
@@ -276,12 +244,12 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	args = &AppendEntriesArgs{
 		Term:         term,
 		PrevLogIndex: newNext - 1,
-		PrevLogTerm:  rf.state.getLogEntryTermWithNoLock(newNext - 1),
-		LeaderCommit: rf.state.getCommitIndexWithNoLock()}
+		PrevLogTerm:  rf.state.getLogEntryTerm(newNext - 1),
+		LeaderCommit: rf.state.getCommitIndex()}
 
 	if !heartbeat {
 		args.Entries = append(args.Entries,
-			rf.state.getLogRangeWithNoLock(newNext, newIndex+1)...)
+			rf.state.getLogRange(newNext, newIndex+1)...)
 	}
 
 	return args
@@ -295,13 +263,10 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	rf.state.queue <- req
 	defer close(req.done)
 
-	rf.state.rw.Lock()
-	defer rf.state.rw.Unlock()
-
 	shouldReturn, newEntries = false, false
 	nnewIndex, nnewNext = newIndex, newNext
 
-	if !heartbeat && !rf.state.indexExistWithNoLock(newIndex+1) {
+	if !heartbeat && !rf.state.indexExist(newIndex+1) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 		shouldReturn = true
 	}
@@ -311,15 +276,13 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		// Pass through
 
 	case !reply.Success && reply.Term > term:
-		rf.state.CurrentTerm = reply.Term
-		rf.state.role = FOLLOWER
+		rf.state.setCurrentTerm(reply.Term)
+		rf.state.setRole(FOLLOWER)
 
-		rf.state.rw.Unlock()
 		select {
 		case rf.appendReplyCh <- true:
 		case <-done:
 		}
-		rf.state.rw.Lock()
 
 	case !reply.Success && heartbeat:
 		//DTPrintf("%d: heartbeat discovered %d's conflict logs\n", rf.me, i)
@@ -339,7 +302,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		j := newIndex
 		// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
 		for ; j > 0; j-- {
-			if rf.state.getLogEntryTermWithNoLock(j) == reply.ConflictTerm {
+			if rf.state.getLogEntryTerm(j) == reply.ConflictTerm {
 				break
 			}
 		}
@@ -348,8 +311,8 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		//DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
 
 	case reply.Success && heartbeat:
-		nnewIndex = rf.state.getLogLenWithNoLock() - 1
-		nnewNext = rf.state.getNextIndexWithNoLock(i)
+		nnewIndex = rf.state.getLogLen() - 1
+		nnewNext = rf.state.getNextIndex(i)
 		if nnewIndex >= nnewNext {
 			//DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
 			//go rf.sendAppend(done, i, false, term, nnewNe, nnewIndex)
@@ -359,13 +322,13 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 
 	case reply.Success:
 		iMatch := args.PrevLogIndex + len(args.Entries)
-		rf.state.setMatchIndexWithNoLock(i, iMatch)
+		rf.state.setMatchIndex(i, iMatch)
 		//DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
 
 		iNext := newNext + len(args.Entries)
-		rf.state.setNextIndexWithNoLock(i, iNext)
+		rf.state.setNextIndex(i, iNext)
 
-		rf.updateCommitIndexWithNoLock(term)
+		rf.state.updateCommitIndex(term, len(rf.peers), rf.commit)
 
 		shouldReturn = true
 

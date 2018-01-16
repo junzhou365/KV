@@ -168,6 +168,14 @@ func (rs *RaftState) getLogRangeWithNoLock(start int, end int) []RaftLogEntry {
 	return rs.Log[offStart:offEnd]
 }
 
+func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	offStart, offEnd := start-rs.logBase, end-rs.logBase
+	return rs.Log[offStart:offEnd]
+}
+
 // Discard log entries up to the lastIndex
 func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 	if lastIndex == -1 {
@@ -318,6 +326,28 @@ func (rs *RaftState) indexExist(index int) bool {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 	return index > rs.logBase
+}
+
+func (rs *RaftState) updateCommitIndex(term int, numPeers int, commitCh chan bool) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
+	logLen := rs.getLogLenWithNoLock()
+	for n := logLen - 1; n > rs.commitIndex; n-- {
+		count := 1
+		for j := 0; j < numPeers; j++ {
+			if j != rs.me && rs.matchIndexes[j] >= n {
+				count++
+			}
+		}
+		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
+		if count > numPeers/2 && n > rs.commitIndex &&
+			term == rs.getLogEntryTermWithNoLock(n) {
+			rs.commitIndex = n
+			go func() { commitCh <- true }()
+			return
+		}
+	}
 }
 
 //
