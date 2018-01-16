@@ -98,6 +98,10 @@ func (rf *Raft) GetLogEntryTermWithNoLock(index int) int {
 	return rf.state.getLogEntryTermWithNoLock(index)
 }
 
+func (rf *Raft) GetLogEntryTerm(index int) int {
+	return rf.state.getLogEntryTerm(index)
+}
+
 func (rf *Raft) IndexExistWithNoLock(index int) bool {
 	return rf.state.indexExistWithNoLock(index)
 }

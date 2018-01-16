@@ -7,27 +7,11 @@ import (
 type KVState struct {
 	rw sync.RWMutex
 
-	highestSentTerm int
-
 	Table map[string]string
 
 	Duplicates map[int]Op
 
 	liveRequests map[int]*Request
-}
-
-func (k *KVState) getHighestSentTerm() int {
-	k.rw.RLock()
-	defer k.rw.RUnlock()
-	return k.highestSentTerm
-}
-
-func (k *KVState) setHighestSentTerm(h int) {
-	k.rw.Lock()
-	defer k.rw.Unlock()
-	if k.highestSentTerm < h {
-		k.highestSentTerm = h
-	}
 }
 
 func (k *KVState) getValue(key string) (string, bool) {

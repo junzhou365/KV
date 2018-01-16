@@ -57,7 +57,7 @@ func (kv *RaftKV) run() {
 		for {
 			select {
 			case req := <-kv.queue:
-				DTPrintf("%d: not leader, drain the req %+v\n", kv.me, req)
+				DTPrintf("%d: drain the req %+v\n", kv.me, req)
 				<-req.valCh
 				req.resCh <- nil
 			default:
@@ -67,6 +67,30 @@ func (kv *RaftKV) run() {
 	}
 
 	msgStream := kv.msgStream()
+
+	getNextReq := func(index int) (req *Request) {
+		// msg must see the req that caused the msg
+		for {
+			req = <-kv.queue
+			reqVal := <-req.valCh
+			DTPrintf("%d: new req index %d, msg index is %d\n", kv.me, reqVal.index, index)
+			switch {
+			case reqVal.index > index:
+				// Not the right msg. This msg was lagged
+				DTPrintf("%d: lagged msg %d\n", kv.me, index)
+
+			case reqVal.index == index && reqVal.term == kv.rf.GetLogEntryTerm(index):
+				return req
+
+			default:
+				// unsynced req
+				DTPrintf("%d: req.Index %d < msg.index %d\n", kv.me, reqVal.index, index)
+				log.Fatal("req.Index < index")
+			}
+		}
+	}
+
+LOOP:
 	for {
 		select {
 		case msg := <-msgStream:
@@ -75,37 +99,22 @@ func (kv *RaftKV) run() {
 			kv.checkForTakingSnapshot(msg.Index)
 
 			// If we were leader but lost, even if we've applied change. Just
-			// retry. If we were follower but gained leadership, there'd be no
-			// reqs. Use the highestSentTerm to avoid this situation
-			if term, isLeader := kv.rf.GetState(); !isLeader || term > kv.state.getHighestSentTerm() {
+			// retry. If we were follower but just gained leadership, there
+			// might be no reqs.
+			switch term, isLeader := kv.rf.GetState(); {
+			case !isLeader:
 				drainQueue()
 				DTPrintf("%d: drained the queue for index %d because we are no longer leader\n",
 					kv.me, msg.Index)
-				continue
+				continue LOOP
+
+			// new leader, lagged msg
+			case term > kv.rf.GetLogEntryTerm(msg.Index):
+				continue LOOP
 			}
 
-			select {
-			// msg must see the req that caused the msg
-			case req := <-kv.queue:
-				DTPrintf("%d: get new req %+v\n", kv.me, req)
-				reqVal := <-req.valCh
-				DTPrintf("%d: new req index %d, msg index is %d\n", kv.me, reqVal.index, msg.Index)
-
-				switch term, _ := kv.rf.GetState(); {
-				// Leader role was lost
-				case term != reqVal.term || reqVal.index > msg.Index:
-					DTPrintf("%d: drain the req.Index %d\n", kv.me, reqVal.index)
-					req.resCh <- nil
-
-				case reqVal.index == msg.Index:
-					req.resCh <- msg.Command
-
-				default:
-					// unsynced req
-					DTPrintf("%d: req.Index %d < msg.index %d\n", kv.me, reqVal.index, msg.Index)
-					log.Fatal("req.Index < index")
-				}
-			}
+			req := getNextReq(msg.Index)
+			req.resCh <- msg.Command
 
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -174,8 +183,6 @@ func (kv *RaftKV) serve() {
 			DTPrintf("%d: not leader for op %+v. return from serve()\n", kv.me, *req.op)
 			continue
 		}
-
-		kv.state.setHighestSentTerm(term)
 
 		DTPrintf("%d: Server handles op: %+v. The req index is %d\n",
 			kv.me, *req.op, index)
