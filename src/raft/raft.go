@@ -102,11 +102,20 @@ func (rf *Raft) IndexExistWithNoLock(index int) bool {
 	return rf.state.indexExistWithNoLock(index)
 }
 
+func (rf *Raft) IndexValidWithNoLock(index int) bool {
+	return rf.state.indexExistWithNoLock(index) && index < rf.state.getLogLenWithNoLock()
+}
+
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
 	return rf.state.getCurrentTerm(), rf.state.getRole() == LEADER
+}
+
+func (rf *Raft) GetStateWithNoLock() (int, bool) {
+	// Your code here (2A).
+	return rf.state.CurrentTerm, rf.state.role == LEADER
 }
 
 //
@@ -347,7 +356,7 @@ func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 
 	//DTPrintf("%d: get InstallSnapshot RPC args: %+v\n", rf.me, args)
-	//defer DTPrintf("%d: reply InstallSnapshot RPC args: %+v\n", rf.me, args)
+	//defer DTPrintf("%d: reply InstallSnapshot RPC args: %d\n", rf.me, args.LastIncludedEntryIndex)
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -392,8 +401,8 @@ func (rf *Raft) InstallSnapshot(
 		return
 	}
 
-	DTPrintf("%d: own states before snapshot change. lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
-		rf.state.lastIncludedEntryIndex, rf.state.getLogLenWithNoLock())
+	//DTPrintf("%d: own states before snapshot change. lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
+	//rf.state.lastIncludedEntryIndex, rf.state.getLogLenWithNoLock())
 
 	use := true
 	// If lastIncludedEntry exists in log and we have applied it, then we could
@@ -435,7 +444,7 @@ func (rf *Raft) commitLoop() {
 
 			for _, entry := range entries {
 				rf.applyCh <- entry
-				DTPrintf("%d: applied the command %v at log index %d\n",
+				DTPrintf("%d: applied the command %+v at log index %d\n",
 					rf.me, entry.Command, entry.Index)
 			}
 		}

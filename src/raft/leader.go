@@ -123,7 +123,7 @@ func (rf *Raft) appendNewEntries(
 func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term int,
 	next int, newIndex int) {
 
-	DTPrintf("%d: begins to send Append to %d\n", rf.me, i)
+	//DTPrintf("%d: begins to send Append to %d\n", rf.me, i)
 
 	newNext := next
 	oldNext := newNext
@@ -368,6 +368,7 @@ LOOP:
 		}
 
 		if !ok {
+			DTPrintf("%d: send Snapshot failed\n", rf.me)
 			continue LOOP
 		}
 
@@ -408,6 +409,7 @@ LOOP:
 			rf.state.setNextIndexWithNoLock(i, iMatch+1)
 
 			ret = iMatch + 1
+			DTPrintf("%d: in snapshot set next to %d\n", rf.me, rf.state.getNextIndexWithNoLock(i))
 		}
 
 		rf.state.rw.Unlock()

@@ -20,10 +20,15 @@ type Op struct {
 	ClientId int
 }
 
-type Request struct {
-	resCh chan interface{}
+type RequestValue struct {
 	index int
 	term  int
+}
+
+type Request struct {
+	resCh chan interface{}
+	valCh chan RequestValue
+	op    *Op
 }
 
 type RaftKV struct {
@@ -39,51 +44,72 @@ type RaftKV struct {
 	// Your definitions here.
 	state       KVState
 	queue       chan *Request
+	reqs        chan *Request
 	notifyCh    chan raft.ApplyMsg
 	maxRequests int
 	interval    time.Duration
 }
 
-func (kv *RaftKV) serve() {
+func (kv *RaftKV) run() {
+	go kv.serve()
+
+	drainQueue := func() {
+		for {
+			select {
+			case req := <-kv.queue:
+				DTPrintf("%d: not leader, drain the req %+v\n", kv.me, req)
+				<-req.valCh
+				req.resCh <- nil
+			default:
+				return
+			}
+		}
+	}
+
 	msgStream := kv.msgStream()
 	for {
 		select {
 		case msg := <-msgStream:
 
+			DTPrintf("%d: new raw msg, its index %d\n", kv.me, msg.Index)
 			kv.checkForTakingSnapshot(msg.Index)
 
-			select {
-			case req := <-kv.queue:
-				index := msg.Index
-				DTPrintf("%d: new req %+v, msg index is %d\n", kv.me, req, index)
+			// If we were leader but lost, even if we've applied change. Just
+			// retry. If we were follower but gained leadership, there'd be no
+			// reqs. Use the highestSentTerm to avoid this situation
+			if term, isLeader := kv.rf.GetState(); !isLeader || term > kv.state.getHighestSentTerm() {
+				drainQueue()
+				DTPrintf("%d: drained the queue for index %d because we are no longer leader\n",
+					kv.me, msg.Index)
+				continue
+			}
 
-				// Leader role was lost
+			select {
+			// msg must see the req that caused the msg
+			case req := <-kv.queue:
+				DTPrintf("%d: get new req %+v\n", kv.me, req)
+				reqVal := <-req.valCh
+				DTPrintf("%d: new req index %d, msg index is %d\n", kv.me, reqVal.index, msg.Index)
+
 				switch term, _ := kv.rf.GetState(); {
-				case term != req.term || req.index > index:
-					DTPrintf("%d: drain the index %d\n", kv.me, req.index)
+				// Leader role was lost
+				case term != reqVal.term || reqVal.index > msg.Index:
+					DTPrintf("%d: drain the req.Index %d\n", kv.me, reqVal.index)
 					req.resCh <- nil
-				case req.index == index:
+
+				case reqVal.index == msg.Index:
 					req.resCh <- msg.Command
+
 				default:
 					// unsynced req
-					DTPrintf("%d: req.index %d < msg.index %d\n", kv.me, req.index, index)
-					log.Fatal("req.index < index")
+					DTPrintf("%d: req.Index %d < msg.index %d\n", kv.me, reqVal.index, msg.Index)
+					log.Fatal("req.Index < index")
 				}
-			default:
-				DTPrintf("%d: drain the msg %d because there's no reqs\n", kv.me, msg.Index)
 			}
+
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
-			LOOP:
-				for {
-					select {
-					case req := <-kv.queue:
-						DTPrintf("%d: not leader, drain the index %d\n", kv.me, req.index)
-						req.resCh <- nil
-					default:
-						break LOOP
-					}
-				}
+				drainQueue()
 			}
 		}
 	}
@@ -140,26 +166,48 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 	return msgStream
 }
 
+func (kv *RaftKV) serve() {
+	for req := range kv.reqs {
+		index, term, isLeader := kv.rf.Start(*req.op)
+		if !isLeader {
+			req.resCh <- true
+			DTPrintf("%d: not leader for op %+v. return from serve()\n", kv.me, *req.op)
+			continue
+		}
+
+		kv.state.setHighestSentTerm(term)
+
+		DTPrintf("%d: Server handles op: %+v. The req index is %d\n",
+			kv.me, *req.op, index)
+		// we must serialize this feeding req because otherwise reqs are in
+		// wrong order
+		kv.queue <- req
+		DTPrintf("%d: put new req %+v\n", kv.me, req)
+
+		// provide the value in the future
+		go func(req *Request) {
+			val := RequestValue{index: index, term: term}
+			req.valCh <- val
+			DTPrintf("%d: val %+v is put to req %+v\n", kv.me, val, req)
+		}(req)
+
+	}
+}
+
 // invoke the agreement on operation.
 // return applied Op and WrongLeader
 func (kv *RaftKV) commitOperation(op Op) interface{} {
 	// The Start() and putting req to the queue must be done atomically
-	kv.mu.Lock()
-	index, term, isLeader := kv.rf.Start(op)
+	req := &Request{
+		resCh: make(chan interface{}),
+		valCh: make(chan RequestValue),
+		op:    &op}
 
-	if !isLeader {
-		kv.mu.Unlock()
-		return true
-	}
-
-	DTPrintf("%d: Server handles op: %+v. The req index is %d\n",
-		kv.me, op, index)
-	req := &Request{resCh: make(chan interface{}), index: index, term: term}
-	kv.queue <- req
-	kv.mu.Unlock()
+	DTPrintf("%d: new FUCK req %+v is created\n", kv.me, req)
+	kv.reqs <- req
 
 	cmd := <-req.resCh
-	//DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
+	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
 	if cmd == nil {
 		return Err("Leader role lost")
 	}
@@ -263,12 +311,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.notifyCh = make(chan raft.ApplyMsg)
 	kv.queue = make(chan *Request, kv.maxRequests)
+	kv.reqs = make(chan *Request)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.saveOrRestoreSnapshot(kv.readSnapshot(), true)
 
 	// You may need initialization code here.
-	go kv.serve()
+	go kv.run()
 
 	DTPrintf("%d: is created\n", kv.me)
 
@@ -276,6 +325,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
+	defer DTPrintf("%d: check for taking snapshot done for index: %d\n", kv.me, lastIndex)
 	kv.state.rw.RLock()
 	defer kv.state.rw.RUnlock()
 
@@ -284,14 +334,18 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 	rw.Lock()
 	defer rw.Unlock()
 
+	DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
+
 	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
-		if !kv.rf.IndexExistWithNoLock(lastIndex) {
-			if _, isLeader := kv.rf.GetState(); !isLeader {
+		if !kv.rf.IndexValidWithNoLock(lastIndex) {
+			if _, isLeader := kv.rf.GetStateWithNoLock(); isLeader {
 				log.Fatal("leader lost snapshots")
 			}
 			DTPrintf("%d: new snapshot was given. Just return\n", kv.me)
 			return
 		}
+
+		DTPrintf("%d: take snapshot\n", kv.me)
 		lastTerm := kv.rf.GetLogEntryTermWithNoLock(lastIndex)
 		// we must first save snapshot
 		kv.takeSnapshotWithNoLock(lastIndex, lastTerm)

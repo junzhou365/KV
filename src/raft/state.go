@@ -79,9 +79,9 @@ func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
 
 	switch {
 	case offsettedLastIndex < 0 || offsettedLastIndex >= len(rs.Log):
-		DTPrintf("%d: logBase: %d, offset: %d\n", rs.me, rs.logBase, offsettedLastIndex)
+		DTPrintf("%d: logBase: %d, offset: %d, log size: %d\n", rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
 	case offsettedLastIndex == 0:
-		DTPrintf("%d: logBase: %d, lastTerm: %d in getLogEntryTermWithNoLock\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
+		//DTPrintf("%d: logBase: %d, lastTerm: %d in getLogEntryTermWithNoLock\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
 		return rs.lastIncludedEntryTerm
 	}
 

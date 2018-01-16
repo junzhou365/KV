@@ -155,18 +155,19 @@ func GenericTest(t *testing.T, tag string, nclients int, unreliable bool, crash 
 			}()
 			last := ""
 			key := strconv.Itoa(cli)
+			DTESTPrintf("%d: PUT k: %v, v: %v, j: %d", cli, key, last, j)
 			myck.Put(key, last)
 			for atomic.LoadInt32(&done_clients) == 0 {
 				if (rand.Int() % 1000) < 500 {
 					nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 					// log.Printf("%d: client new append %v\n", cli, nv)
-					DTESTPrintf("%d: Append k: %v, v: %v, j: %d", cli, key, nv, j)
+					DTESTPrintf("%d cli: Append k: %v, v: %v, j: %d", cli, key, nv, j)
 					myck.Append(key, nv)
 					last = NextValue(last, nv)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
-					DTESTPrintf("%d: get k: %v, j: %d", cli, key, j)
+					DTESTPrintf("%d cli: get k: %v, j: %d", cli, key, j)
 					v := myck.Get(key)
 					if v != last {
 						log.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
