@@ -6,16 +6,7 @@ import (
 )
 
 func (rf *Raft) runLeader() {
-	// Initiliaze next and match indexes
-	logLen := rf.state.getLogLen()
-	rf.state.rw.Lock()
-	rf.state.nextIndexes = make([]int, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		rf.state.nextIndexes[i] = logLen
-	}
-	rf.state.matchIndexes = make([]int, len(rf.peers))
-	rf.state.rw.Unlock()
-
+	rf.state.initializeMatchAndNext()
 	term := rf.state.getCurrentTerm()
 
 	heartbeatTimer := time.After(0)
@@ -328,7 +319,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		iNext := newNext + len(args.Entries)
 		rf.state.setNextIndex(i, iNext)
 
-		rf.state.updateCommitIndex(term, len(rf.peers), rf.commit)
+		rf.state.updateCommitIndex(term, rf.commit)
 
 		shouldReturn = true
 
@@ -346,22 +337,19 @@ func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) 
 	rf.state.queue <- req
 	defer close(req.done)
 
-	rf.state.rw.RLock()
-	defer rf.state.rw.RUnlock()
-
-	if rf.state.indexExistWithNoLock(next) {
+	if rf.state.indexExist(next) {
 		DTPrintf("%d: next exists\n", rf.me)
 		return nil
 	}
 
-	lastIndex := rf.state.getLastIndexWithNoLock()
-	lastTerm := rf.state.getLastTermWithNoLock()
+	lastIndex := rf.state.getLastIndex()
+	lastTerm := rf.state.getLastTerm()
 
 	args = &InstallSnapshotArgs{
 		Term: term,
 		LastIncludedEntryIndex: lastIndex,
 		LastIncludedEntryTerm:  lastTerm,
-		Data: rf.persister.ReadSnapshot()}
+		Data: rf.state.readSnapshot(rf.persister)}
 
 	return args
 }
@@ -373,32 +361,27 @@ func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnap
 	rf.state.queue <- req
 	defer close(req.done)
 
-	rf.state.rw.Lock()
-	defer rf.state.rw.Unlock()
-
 	ret = -1
 
 	switch {
 	case reply.Term > args.Term:
-		rf.state.CurrentTerm = reply.Term
-		rf.state.role = FOLLOWER
-		//DTPrintf("%d: discovered new term\n", rf.me)
-		rf.state.rw.Unlock()
+		rf.state.setCurrentTerm(reply.Term)
+		rf.state.setRole(FOLLOWER)
+
 		select {
 		case rf.appendReplyCh <- true:
 		case <-done:
 		}
-		rf.state.rw.Lock()
 
 	default:
 		// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
-		rf.state.setMatchIndexWithNoLock(i, args.LastIncludedEntryIndex)
+		rf.state.setMatchIndex(i, args.LastIncludedEntryIndex)
 
-		iMatch := rf.state.getMatchIndexWithNoLock(i)
-		rf.state.setNextIndexWithNoLock(i, iMatch+1)
+		iMatch := rf.state.getMatchIndex(i)
+		rf.state.setNextIndex(i, iMatch+1)
 
 		ret = iMatch + 1
-		DTPrintf("%d: in snapshot set next to %d\n", rf.me, rf.state.getNextIndexWithNoLock(i))
+		DTPrintf("%d: in snapshot set next to %d\n", rf.me, rf.state.getNextIndex(i))
 	}
 
 	return ret

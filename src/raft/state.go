@@ -8,8 +8,9 @@ import (
 )
 
 type RaftState struct {
-	rw sync.RWMutex
-	me int //for debug
+	rw       sync.RWMutex
+	me       int //for debug
+	numPeers int
 
 	CurrentTerm int
 	VotedFor    int
@@ -126,10 +127,14 @@ func (rs *RaftState) getLogSize() int {
 	return len(rs.Log)
 }
 
-func (rs *RaftState) logEntryStreamWithNoLock(done <-chan interface{}) <-chan indexEntry {
+func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 	stream := make(chan indexEntry)
 	go func() {
 		defer close(stream)
+
+		rs.rw.RLock()
+		defer rs.rw.RUnlock()
+
 		for i, l := range rs.Log {
 			select {
 			case stream <- indexEntry{index: i + rs.logBase, entry: l}:
@@ -143,7 +148,9 @@ func (rs *RaftState) logEntryStreamWithNoLock(done <-chan interface{}) <-chan in
 }
 
 // Delete entries [deleteIndex:]
-func (rs *RaftState) truncateLogWithNoLock(deleteIndex int) {
+func (rs *RaftState) truncateLog(deleteIndex int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
 	if deleteIndex <= rs.logBase {
 		log.Fatal("invalid deleteIndex")
 	}
@@ -154,6 +161,12 @@ func (rs *RaftState) truncateLogWithNoLock(deleteIndex int) {
 func (rs *RaftState) appendLogEntriesWithNoLock(entries []RaftLogEntry) int {
 	rs.Log = append(rs.Log, entries...)
 	return len(rs.Log) + rs.logBase - 1
+}
+
+func (rs *RaftState) appendLogEntries(entries []RaftLogEntry) int {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+	return rs.appendLogEntriesWithNoLock(entries)
 }
 
 func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
@@ -285,6 +298,17 @@ func (rs *RaftState) setMatchIndexWithNoLock(i int, m int) {
 	}
 }
 
+func (rs *RaftState) initializeMatchAndNext() {
+	rs.rw.Lock()
+	logLen := rs.getLogLenWithNoLock()
+	rs.nextIndexes = make([]int, rs.numPeers)
+	for i := 0; i < rs.numPeers; i++ {
+		rs.nextIndexes[i] = logLen
+	}
+	rs.matchIndexes = make([]int, rs.numPeers)
+	rs.rw.Unlock()
+}
+
 func (rs *RaftState) getLastIndex() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
@@ -328,26 +352,51 @@ func (rs *RaftState) indexExist(index int) bool {
 	return index > rs.logBase
 }
 
-func (rs *RaftState) updateCommitIndex(term int, numPeers int, commitCh chan bool) {
+func (rs *RaftState) updateCommitIndex(term int, commitCh chan bool) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
 	logLen := rs.getLogLenWithNoLock()
 	for n := logLen - 1; n > rs.commitIndex; n-- {
 		count := 1
-		for j := 0; j < numPeers; j++ {
+		for j := 0; j < rs.numPeers; j++ {
 			if j != rs.me && rs.matchIndexes[j] >= n {
 				count++
 			}
 		}
 		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		if count > numPeers/2 && n > rs.commitIndex &&
+		if count > rs.numPeers/2 && n > rs.commitIndex &&
 			term == rs.getLogEntryTermWithNoLock(n) {
 			rs.commitIndex = n
 			go func() { commitCh <- true }()
 			return
 		}
 	}
+}
+
+func (rs *RaftState) appliedEntriesStream() <-chan ApplyMsg {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
+	stream := make(chan ApplyMsg)
+	go func() {
+		defer close(stream)
+
+		rs.rw.Lock()
+		defer rs.rw.Unlock()
+
+		for rs.commitIndex > rs.lastApplied {
+			rs.lastApplied++
+			DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
+				rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
+			stream <- ApplyMsg{
+				Index:   rs.lastApplied,
+				Command: rs.getLogEntryWithNoLock(rs.lastApplied).Command}
+		}
+
+	}()
+
+	return stream
 }
 
 //
@@ -406,4 +455,11 @@ func (rs *RaftState) readPersist(persister *Persister) {
 		d.Decode(&rs.VotedFor)
 		d.Decode(&rs.Log)
 	}
+}
+
+func (rs *RaftState) readSnapshot(persister *Persister) []byte {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	return persister.ReadSnapshot()
 }
