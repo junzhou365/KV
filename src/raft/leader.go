@@ -146,7 +146,7 @@ func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term 
 
 		//DTPrintf("%d: for %d [RUNLOCK] finish processing Append req\n", rf.me, i)
 
-		args := rf.state.getAppendArgs(newNext, newIndex, term, heartbeat)
+		args := rf.getAppendArgs(newNext, newIndex, term, heartbeat)
 		if args == nil {
 			continue
 		}
@@ -395,4 +395,34 @@ LOOP:
 		//DTPrintf("%d: for %d [UNLOCK] finish processing Snapshot reply\n", rf.me, i)
 		return ret
 	}
+}
+
+func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
+	heartbeat bool) (args *AppendEntriesArgs) {
+
+	req := StateRequest{done: make(chan interface{})}
+	rf.state.queue <- req
+	defer close(req.done)
+
+	// XXX: will be removed
+	rf.state.rw.RLock()
+	defer rf.state.rw.RUnlock()
+
+	if !rf.state.indexExistWithNoLock(newNext) {
+		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
+		return nil
+	}
+
+	args = &AppendEntriesArgs{
+		Term:         term,
+		PrevLogIndex: newNext - 1,
+		PrevLogTerm:  rf.state.getLogEntryTermWithNoLock(newNext - 1),
+		LeaderCommit: rf.state.getCommitIndexWithNoLock()}
+
+	if !heartbeat {
+		args.Entries = append(args.Entries,
+			rf.state.getLogRangeWithNoLock(newNext, newIndex+1)...)
+	}
+
+	return args
 }
