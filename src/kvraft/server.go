@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"log"
@@ -45,9 +46,13 @@ type RaftKV struct {
 	state       KVState
 	queue       chan *Request
 	reqs        chan *Request
-	notifyCh    chan raft.ApplyMsg
 	maxRequests int
 	interval    time.Duration
+}
+
+type MsgOp struct {
+	msg  raft.ApplyMsg
+	done chan interface{}
 }
 
 func (kv *RaftKV) run() {
@@ -90,31 +95,37 @@ func (kv *RaftKV) run() {
 		}
 	}
 
-LOOP:
 	for {
 		select {
-		case msg := <-msgStream:
+		case msgOp := <-msgStream:
+
+			msg := msgOp.msg
 
 			DTPrintf("%d: new raw msg, its index %d\n", kv.me, msg.Index)
-			kv.checkForTakingSnapshot(msg.Index)
 
 			// If we were leader but lost, even if we've applied change. Just
 			// retry. If we were follower but just gained leadership, there
 			// might be no reqs.
 			switch term, isLeader := kv.rf.GetState(); {
 			case !isLeader:
+
+				DTPrintf("%d: try to drain the queue for index %d because we are no longer leader\n",
+					kv.me, msg.Index)
 				drainQueue()
 				DTPrintf("%d: drained the queue for index %d because we are no longer leader\n",
 					kv.me, msg.Index)
-				continue LOOP
 
 			// new leader, lagged msg
 			case term > kv.rf.GetLogEntryTerm(msg.Index):
-				continue LOOP
+				// pass through
+
+			default:
+				req := getNextReq(msg.Index)
+				req.resCh <- msg.Command
 			}
 
-			req := getNextReq(msg.Index)
-			req.resCh <- msg.Command
+			close(msgOp.done)
+			DTPrintf("%d: raw msg %d is done\n", kv.me, msg.Index)
 
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -125,8 +136,8 @@ LOOP:
 }
 
 // long-time running loop for server applying commands received from Raft
-func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
-	msgStream := make(chan raft.ApplyMsg)
+func (kv *RaftKV) msgStream() <-chan MsgOp {
+	msgStream := make(chan MsgOp)
 
 	go func() {
 		defer close(msgStream)
@@ -139,10 +150,11 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 
 			if msg.Snapshot != nil {
 				kv.saveOrRestoreSnapshot(msg.Snapshot, msg.UseSnapshot)
-				close(msg.SavedCh)
+				//close(msg.SavedCh)
 				continue
 			}
 
+			DTPrintf("%d: new msg %+v\n", kv.me, msg)
 			op := msg.Command.(Op)
 			DTPrintf("%d: new msg. msg.Index: %d\n", kv.me, msg.Index)
 
@@ -150,25 +162,31 @@ func (kv *RaftKV) msgStream() <-chan raft.ApplyMsg {
 			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
 				msg.Command = resOp
 				//DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
-				msgStream <- msg
-				continue
+			} else {
+
+				switch op.Type {
+				case OP_GET:
+					// nonexistent value is ok
+					value, _ := kv.state.getValue(op.Key)
+					op.Value = value
+				case OP_PUT:
+					kv.state.setValue(op.Key, op.Value)
+				case OP_APPEND:
+					kv.state.appendValue(op.Key, op.Value)
+				}
+
+				kv.state.setDup(op.ClientId, op)
+				msg.Command = op
+				//DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
 			}
 
-			switch op.Type {
-			case OP_GET:
-				// nonexistent value is ok
-				value, _ := kv.state.getValue(op.Key)
-				op.Value = value
-			case OP_PUT:
-				kv.state.setValue(op.Key, op.Value)
-			case OP_APPEND:
-				kv.state.appendValue(op.Key, op.Value)
-			}
+			DTPrintf("%d: msg.Index: %d FUCK THIS SHIT\n", kv.me, msg.Index)
 
-			kv.state.setDup(op.ClientId, op)
-			msg.Command = op
-			//DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
-			msgStream <- msg
+			kv.checkForTakingSnapshot(msg.Index)
+			msgOp := MsgOp{msg: msg, done: make(chan interface{})}
+			msgStream <- msgOp
+			<-msgOp.done
+			DTPrintf("%d: msgOp %d is done\n", kv.me, msg.Index)
 		}
 	}()
 
@@ -316,7 +334,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.notifyCh = make(chan raft.ApplyMsg)
 	kv.queue = make(chan *Request, kv.maxRequests)
 	kv.reqs = make(chan *Request)
 
@@ -333,37 +350,48 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 	defer DTPrintf("%d: check for taking snapshot done for index: %d\n", kv.me, lastIndex)
-	kv.state.rw.RLock()
-	defer kv.state.rw.RUnlock()
+	// Take kv lock first
 
-	checkSnapshotForRaft := func() {
-		// RaftStateSize should have a consistent view
-		req := StateRequest{done: make(chan interface{})}
-		rf.state.queue <- req
-		defer close(req.done)
+	DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
 
-		rw := kv.rf.GetPersisterLock()
-		rw.Lock()
-		defer rw.Unlock()
+	takeSnapshot := func(lastIndex int, lastTerm int) {
+		DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
+		defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
 
-		DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
+		w := new(bytes.Buffer)
+		e := gob.NewEncoder(w)
 
-		if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
-			if !kv.rf.IndexValidWithNoLock(lastIndex) {
-				if _, isLeader := kv.rf.GetStateWithNoLock(); isLeader {
-					log.Fatal("leader lost snapshots")
-				}
-				DTPrintf("%d: new snapshot was given. Just return\n", kv.me)
-				return
-			}
+		e.Encode(lastIndex)
+		e.Encode(lastTerm)
 
-			DTPrintf("%d: take snapshot\n", kv.me)
-			lastTerm := kv.rf.GetLogEntryTermWithNoLock(lastIndex)
-			// we must first save snapshot
-			kv.takeSnapshotWithNoLock(lastIndex, lastTerm)
-			kv.rf.DiscardLogEnriesWithNoLock(lastIndex)
-		}
+		kv.state.rw.RLock()
+		e.Encode(kv.state.Table)
+		e.Encode(kv.state.Duplicates)
+		kv.state.rw.RUnlock()
+
+		snapshot := w.Bytes()
+		// Protected by Serialize
+		kv.persister.SaveSnapshot(snapshot)
 	}
 
-	checkSnapshotForRaft()
+	// It's okay to get raftstatesize without lock because msg is serialized
+	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
+		if !kv.rf.IndexValid(lastIndex) {
+			DTPrintf("%d: new snapshot was given for %d. Just return\n", kv.me, lastIndex)
+			return
+			//if _, isLeader := kv.rf.GetState(); !isLeader {
+			//DTPrintf("%d: new snapshot was given for %d. Just return\n", kv.me, lastIndex)
+			//return
+			//} else {
+			//DTPrintf("%d: snapshot was lost for %d. Fatal\n", kv.me, lastIndex)
+			//log.Fatal("snapshot lost")
+			//}
+		}
+
+		DTPrintf("%d: take snapshot\n", kv.me)
+		lastTerm := kv.rf.GetLogEntryTerm(lastIndex)
+		// we must first save snapshot
+		takeSnapshot(lastIndex, lastTerm)
+		kv.rf.DiscardLogEnries(lastIndex)
+	}
 }

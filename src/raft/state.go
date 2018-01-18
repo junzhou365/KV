@@ -30,10 +30,6 @@ type RaftState struct {
 
 	queue chan StateRequest
 }
-type StateRequest struct {
-	done chan interface{}
-}
-
 type RaftLogEntry struct {
 	Term    int
 	Command interface{}
@@ -186,7 +182,9 @@ func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
 	defer rs.rw.RUnlock()
 
 	offStart, offEnd := start-rs.logBase, end-rs.logBase
-	return rs.Log[offStart:offEnd]
+	newEntries := []RaftLogEntry{}
+	newEntries = append(newEntries, rs.Log[offStart:offEnd]...)
+	return newEntries
 }
 
 // Discard log entries up to the lastIndex
@@ -194,6 +192,9 @@ func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 	if lastIndex == -1 {
 		lastIndex = rs.getLogLenWithNoLock() - 1
 	}
+	DTPrintf("%d: before discarding. lastIndex: %d, logBase: %d, log: %+v\n",
+		rs.me, lastIndex, rs.logBase, rs.Log)
+
 	// Keep the nil head
 	rs.lastIncludedEntryIndex = lastIndex
 	rs.lastIncludedEntryTerm = rs.getLogEntryTermWithNoLock(lastIndex)
@@ -211,7 +212,10 @@ func (rs *RaftState) discardLogEnries(lastIndex int) {
 	rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
-func (rs *RaftState) loadSnapshotMetaDataWithNoLock(index int, term int) {
+func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
 	rs.lastIncludedEntryIndex = index
 	rs.lastIncludedEntryTerm = term
 
@@ -352,7 +356,8 @@ func (rs *RaftState) indexExist(index int) bool {
 	return index > rs.logBase
 }
 
-func (rs *RaftState) updateCommitIndex(term int, commitCh chan bool) {
+// return -1 if not found
+func (rs *RaftState) updateCommitIndex(term int) int {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
@@ -368,35 +373,31 @@ func (rs *RaftState) updateCommitIndex(term int, commitCh chan bool) {
 		if count > rs.numPeers/2 && n > rs.commitIndex &&
 			term == rs.getLogEntryTermWithNoLock(n) {
 			rs.commitIndex = n
-			go func() { commitCh <- true }()
-			return
+			return n
 		}
 	}
+
+	return -1
 }
 
-func (rs *RaftState) appliedEntriesStream() <-chan ApplyMsg {
+func (rs *RaftState) appliedEntries() []ApplyMsg {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	stream := make(chan ApplyMsg)
-	go func() {
-		defer close(stream)
+	entries := []ApplyMsg{}
 
-		rs.rw.Lock()
-		defer rs.rw.Unlock()
+	for rs.commitIndex > rs.lastApplied {
+		rs.lastApplied++
+		DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
+			rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
 
-		for rs.commitIndex > rs.lastApplied {
-			rs.lastApplied++
-			DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
-				rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
-			stream <- ApplyMsg{
-				Index:   rs.lastApplied,
-				Command: rs.getLogEntryWithNoLock(rs.lastApplied).Command}
-		}
+		entries = append(entries, ApplyMsg{
+			Index:   rs.lastApplied,
+			Command: rs.getLogEntryWithNoLock(rs.lastApplied).Command})
+	}
 
-	}()
+	return entries
 
-	return stream
 }
 
 //
@@ -457,9 +458,9 @@ func (rs *RaftState) readPersist(persister *Persister) {
 	}
 }
 
-func (rs *RaftState) readSnapshot(persister *Persister) []byte {
+func (rs *RaftState) readSnapshot(persister *Persister) (int, int, []byte) {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
-	return persister.ReadSnapshot()
+	return rs.lastIncludedEntryIndex, rs.lastIncludedEntryTerm, persister.ReadSnapshot()
 }

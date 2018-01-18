@@ -80,11 +80,11 @@ func (rf *Raft) appendNewEntries(
 		newIndex = rf.state.getLogLen() - 1
 	}
 
-	//DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
+	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
 	for i := 0; i < len(rf.peers); i++ {
 		next := rf.state.getNextIndex(i)
 		if !heartbeat && next > newIndex {
-			//DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
+			DTPrintf("%d: follower %d's next %d than the new index\n", rf.me, i, next)
 			continue
 		}
 
@@ -114,7 +114,8 @@ func (rf *Raft) appendNewEntries(
 func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term int,
 	next int, newIndex int) {
 
-	//DTPrintf("%d: begins to send Append to %d\n", rf.me, i)
+	defer DTPrintf("%d: finished sending Append to %d with next: %d, newIndex: %d\n", rf.me, i, next, newIndex)
+	DTPrintf("%d: begins to send Append to %d with next: %d, newIndex: %d\n", rf.me, i, next, newIndex)
 
 	newNext := next
 	oldNext := newNext
@@ -138,7 +139,7 @@ LOOP:
 		}
 
 		reply := new(AppendEntriesReply)
-		//DTPrintf("%d sends Append RPC to %d for term %d. Args: %+v\n", rf.me, i, term, args)
+		DTPrintf("%d: sends Append to %d with next: %d, newIndex: %d\n", rf.me, i, next, newIndex)
 
 		ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 
@@ -196,11 +197,12 @@ LOOP:
 		args := rf.getSnapshotArgs(term, next)
 
 		if args == nil {
+			DTPrintf("%d: next %d exists for %d\n", rf.me, next, i)
 			return next
 		}
 
 		reply := &InstallSnapshotReply{}
-		DTPrintf("%d: send Snapshot to %d, lastIndex: %d\n",
+		DTPrintf("%d: sends Snapshot to %d, lastIndex: %d\n",
 			rf.me, i, args.LastIncludedEntryIndex)
 
 		ok := rf.peers[i].Call("Raft.InstallSnapshot", args, reply)
@@ -223,9 +225,8 @@ LOOP:
 func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	heartbeat bool) (args *AppendEntriesArgs) {
 
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	jobDone := rf.Serialize("getAppendArgs")
+	defer close(jobDone)
 
 	if !rf.state.indexExist(newNext) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
@@ -250,9 +251,13 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	heartbeat bool, i int, args *AppendEntriesArgs, term int, newIndex int, newNext int) (
 	shouldReturn bool, newEntries bool, nnewIndex int, nnewNext int) {
 
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	defer DTPrintf("%d: process the AppendReply done %+v, heartbeat: %t\n",
+		rf.me, reply, heartbeat)
+
+	jobDone := rf.Serialize("processAppendReply")
+	defer close(jobDone)
+
+	DTPrintf("%d: process the AppendReply %+v, heartbeat: %t\n", rf.me, reply, heartbeat)
 
 	shouldReturn, newEntries = false, false
 	nnewIndex, nnewNext = newIndex, newNext
@@ -305,7 +310,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		nnewIndex = rf.state.getLogLen() - 1
 		nnewNext = rf.state.getNextIndex(i)
 		if nnewIndex >= nnewNext {
-			//DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
+			DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
 			//go rf.sendAppend(done, i, false, term, nnewNe, nnewIndex)
 			newEntries = true
 		}
@@ -314,12 +319,15 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	case reply.Success:
 		iMatch := args.PrevLogIndex + len(args.Entries)
 		rf.state.setMatchIndex(i, iMatch)
-		//DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+		DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
 
 		iNext := newNext + len(args.Entries)
 		rf.state.setNextIndex(i, iNext)
 
-		rf.state.updateCommitIndex(term, rf.commit)
+		commitIndex := rf.state.updateCommitIndex(term)
+		if commitIndex != -1 {
+			go func() { rf.commit <- commitIndex }()
+		}
 
 		shouldReturn = true
 
@@ -333,23 +341,20 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 
 func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) {
 
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	jobDone := rf.Serialize("getSnapshotArgs")
+	defer close(jobDone)
 
 	if rf.state.indexExist(next) {
-		DTPrintf("%d: next exists\n", rf.me)
 		return nil
 	}
 
-	lastIndex := rf.state.getLastIndex()
-	lastTerm := rf.state.getLastTerm()
+	lastIndex, lastTerm, data := rf.state.readSnapshot(rf.persister)
 
 	args = &InstallSnapshotArgs{
 		Term: term,
 		LastIncludedEntryIndex: lastIndex,
 		LastIncludedEntryTerm:  lastTerm,
-		Data: rf.state.readSnapshot(rf.persister)}
+		Data: data}
 
 	return args
 }
@@ -357,9 +362,8 @@ func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) 
 func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnapshotReply,
 	i int, args *InstallSnapshotArgs) (ret int) {
 
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	jobDone := rf.Serialize("processSnapshotReply")
+	defer close(jobDone)
 
 	ret = -1
 

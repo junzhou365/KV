@@ -13,8 +13,7 @@ LOOP:
 	for {
 		select {
 		case rf.rpcCh <- respCh:
-			r := <-respCh
-			DTPrintf("%d: given %v\n", rf.me, r)
+			<-respCh
 
 		case <-time.After(getElectionTimeout()):
 			startElection = true

@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"labrpc"
 	"log"
 	"math/rand"
@@ -53,7 +55,8 @@ type Raft struct {
 	state             RaftState
 	rpcCh             chan chan rpcResp
 	heartbeatInterval time.Duration
-	commit            chan bool
+	commit            chan int
+	snapshotCh        chan ApplyMsg
 	applyCh           chan ApplyMsg
 	newEntry          chan int
 	//sendChs           []chan sendJob
@@ -81,17 +84,16 @@ func (rf *Raft) GetLastIndexAndTerm() (index int, term int) {
 	return index, term
 }
 
-// Only used for accessing persister
-func (rf *Raft) GetPersisterLock() *sync.RWMutex {
-	return &rf.state.rw
+func (rf *Raft) LoadSnapshotMetaData(index int, term int) {
+	rf.state.loadSnapshotMetaData(index, term)
 }
 
-func (rf *Raft) LoadSnapshotMetaDataWithNoLock(index int, term int) {
-	rf.state.loadSnapshotMetaDataWithNoLock(index, term)
+func (rf *Raft) DiscardLogEnries(index int) {
+	rf.state.discardLogEnries(index)
 }
 
-func (rf *Raft) DiscardLogEnriesWithNoLock(index int) {
-	rf.state.discardLogEnriesWithNoLock(index)
+func (rf *Raft) GetLogLen() int {
+	return rf.state.getLogLen()
 }
 
 func (rf *Raft) GetLogEntryTermWithNoLock(index int) int {
@@ -102,12 +104,12 @@ func (rf *Raft) GetLogEntryTerm(index int) int {
 	return rf.state.getLogEntryTerm(index)
 }
 
-func (rf *Raft) IndexExistWithNoLock(index int) bool {
-	return rf.state.indexExistWithNoLock(index)
+func (rf *Raft) IndexExist(index int) bool {
+	return rf.state.indexExist(index)
 }
 
-func (rf *Raft) IndexValidWithNoLock(index int) bool {
-	return rf.state.indexExistWithNoLock(index) && index < rf.state.getLogLenWithNoLock()
+func (rf *Raft) IndexValid(index int) bool {
+	return rf.state.indexExist(index) && index < rf.state.getLogLen()
 }
 
 // return CurrentTerm and whether this server
@@ -148,9 +150,8 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	jobDone := rf.Serialize("RequestVote")
+	defer close(jobDone)
 
 	//defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
 	//defer DTPrintf("%d: done persist]]", rf.me)
@@ -230,12 +231,12 @@ func min(a int, b int) int {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	DTPrintf("%d: get Append for term %d from leader. prevIndex: %d, len of entris: %d\n",
+		rf.me, args.Term, args.PrevLogIndex, len(args.Entries))
+	defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
 
-	//DTPrintf("%d: get Append for term %d from leader. %+v\n", rf.me, args.Term, args)
-	//defer DTPrintf("%d reply Append for term %d to leader\n", rf.me, args.Term)
+	jobDone := rf.Serialize("AppendEntries")
+	defer close(jobDone)
 
 	//defer DTPrintf("%d: disk usage: %d after append", rf.me, rf.persister.RaftStateSize())
 	//defer DTPrintf("%d: done persist]]", rf.me)
@@ -323,12 +324,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				deleteIndex++
 			}
 		}
-		//DTPrintf("%d: append entries succeeds. log: %v\n", rf.me, rf.state.Log)
+		DTPrintf("%d: append entries succeeds. log len: %d\n", rf.me, rf.state.getLogLen())
 
 		lastNewEntryIndex := updatedPrevLogIndex + len(args.Entries)
 		if args.LeaderCommit > rf.state.getCommitIndex() {
-			rf.state.setCommitIndex(min(args.LeaderCommit, lastNewEntryIndex))
-			go func() { rf.commit <- true }()
+			commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
+			rf.state.setCommitIndex(commitIndex)
+			go func() { rf.commit <- commitIndex }()
 		}
 	}
 }
@@ -347,12 +349,11 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(
 	args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 
-	//DTPrintf("%d: get InstallSnapshot RPC args: %+v\n", rf.me, args)
-	//defer DTPrintf("%d: reply InstallSnapshot RPC args: %d\n", rf.me, args.LastIncludedEntryIndex)
+	DTPrintf("%d: get InstallSnapshot RPC args: %d\n", rf.me, args.LastIncludedEntryIndex)
+	defer DTPrintf("%d: reply InstallSnapshot RPC args: %d\n", rf.me, args.LastIncludedEntryIndex)
 
-	req := StateRequest{done: make(chan interface{})}
-	rf.state.queue <- req
-	defer close(req.done)
+	jobDone := rf.Serialize("InstallSnapshot")
+	defer close(jobDone)
 
 	//defer DTPrintf("%d: disk usage: %d after install", rf.me, rf.persister.RaftStateSize())
 	//defer DTPrintf("%d: done persist]]", rf.me)
@@ -387,7 +388,7 @@ func (rf *Raft) InstallSnapshot(
 	resCh <- resp
 
 	// We have saved this snapshot
-	if args.LastIncludedEntryIndex < rf.state.getLastIndex() {
+	if args.LastIncludedEntryIndex <= rf.state.getLastIndex() {
 		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
 		return
 	}
@@ -395,30 +396,49 @@ func (rf *Raft) InstallSnapshot(
 	//DTPrintf("%d: own states before snapshot change. lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
 	//rf.state.lastIncludedEntryIndex, rf.state.getLogLenWithNoLock())
 
-	use := true
+	rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data}
+
 	// If lastIncludedEntry exists in log and we have applied it, then we could
 	// just delete up to that entry.
-	if rf.state.getLogLen()-1 >= args.LastIncludedEntryIndex &&
+	if rf.IndexValid(args.LastIncludedEntryIndex) &&
 		args.LastIncludedEntryTerm == rf.state.getLogEntryTerm(args.LastIncludedEntryIndex) &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
-		use = false
+
+		rf.DiscardLogEnries(args.LastIncludedEntryIndex)
+	} else {
+		rf.DiscardLogEnries(-1)
+		r := bytes.NewBuffer(args.Data)
+		d := gob.NewDecoder(r)
+
+		var lastEntryIndex int
+		d.Decode(&lastEntryIndex)
+
+		var lastEntryTerm int
+		d.Decode(&lastEntryTerm)
+
+		rf.LoadSnapshotMetaData(lastEntryIndex, lastEntryTerm)
+		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 	}
 
-	savedCh := make(chan interface{})
-	rf.applyCh <- ApplyMsg{UseSnapshot: use, Snapshot: args.Data, SavedCh: savedCh}
-	<-savedCh
 }
 
 func (rf *Raft) commitLoop() {
 	for {
 		select {
 		case <-rf.commit:
-
-			for entry := range rf.state.appliedEntriesStream() {
+			entries := rf.state.appliedEntries()
+			for _, entry := range entries {
+				DTPrintf("%d: try to apply at log index %d the command %+v\n",
+					rf.me, entry.Index, entry.Command)
 				rf.applyCh <- entry
-				DTPrintf("%d: applied the command %+v at log index %d\n",
-					rf.me, entry.Command, entry.Index)
+				DTPrintf("%d: applied at log index %d the command %+v\n",
+					rf.me, entry.Index, entry.Command)
 			}
+
+		case msg := <-rf.snapshotCh:
+			msg.SavedCh = make(chan interface{})
+			rf.applyCh <- msg
+			<-msg.SavedCh
 		}
 	}
 }
@@ -518,7 +538,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.rpcCh = make(chan chan rpcResp)
 	rf.newEntry = make(chan int)
 
-	rf.commit = make(chan bool)
+	rf.commit = make(chan int)
+	rf.snapshotCh = make(chan ApplyMsg, 1)
 	rf.applyCh = applyCh
 
 	go rf.state.stateLoop()

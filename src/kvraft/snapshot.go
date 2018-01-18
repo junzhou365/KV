@@ -5,26 +5,24 @@ import (
 	"encoding/gob"
 )
 
-func (kv *RaftKV) takeSnapshotWithNoLock(lastIndex int, lastTerm int) {
-	DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
-	defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
+//type SnapshotOpRequest struct {
+//done chan interface{}
+//}
 
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
+//func (kv *RaftKV) snapshotOpLoop() {
+//for req := range kv.snapshotOpQueue {
+//<-req.done
+//}
+//}
 
-	e.Encode(lastIndex)
-	e.Encode(lastTerm)
-
-	e.Encode(kv.state.Table)
-	e.Encode(kv.state.Duplicates)
-
-	snapshot := w.Bytes()
-	kv.persister.SaveSnapshot(snapshot)
-}
+//func (kv *RaftKV) SerializeSnapshotOps() chan interface{} {
+//req := SnapshotOpRequest{done: make(chan interface{})}
+//kv.snapshotOpQueue <- req
+//return req.done
+//}
 
 func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
-	kv.state.rw.Lock()
-	defer kv.state.rw.Unlock()
+	defer DTPrintf("%d: restore snapshot use: %t, done\n", kv.me, use)
 
 	if snapshot == nil { // bootstrap
 		snapshot = kv.persister.ReadSnapshot()
@@ -36,15 +34,7 @@ func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 
 	kv.persister.SaveSnapshot(snapshot)
 
-	restoreSnapshot := func() {
-		req := StateRequest{done: make(chan interface{})}
-		rf.state.queue <- req
-		defer close(req.done)
-
-		prw := kv.rf.GetPersisterLock()
-		prw.Lock()
-		defer prw.Unlock()
-
+	if use {
 		r := bytes.NewBuffer(snapshot)
 		d := gob.NewDecoder(r)
 
@@ -54,23 +44,12 @@ func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 		var lastEntryTerm int
 		d.Decode(&lastEntryTerm)
 
-		if !use {
-			// snapshot might have been taken before this
-			if kv.rf.IndexExistWithNoLock(lastEntryIndex) {
-				kv.rf.DiscardLogEnriesWithNoLock(lastEntryIndex)
-				DTPrintf("%d: only discard entries up to %d\n", kv.me, lastEntryIndex)
-			}
-		} else {
-			kv.rf.DiscardLogEnriesWithNoLock(-1)
+		kv.state.rw.Lock()
+		d.Decode(&kv.state.Table)
+		d.Decode(&kv.state.Duplicates)
+		kv.state.rw.Unlock()
 
-			d.Decode(&kv.state.Table)
-			d.Decode(&kv.state.Duplicates)
-
-			kv.rf.LoadSnapshotMetaDataWithNoLock(lastEntryIndex, lastEntryTerm)
-			DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
-				kv.me, lastEntryIndex, lastEntryTerm)
-		}
+		DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
+			kv.me, lastEntryIndex, lastEntryTerm)
 	}
-
-	restoreSnapshot()
 }
