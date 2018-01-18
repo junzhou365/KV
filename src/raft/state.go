@@ -3,7 +3,6 @@ package raft
 import (
 	"bytes"
 	"encoding/gob"
-	"log"
 	"sync"
 )
 
@@ -24,9 +23,6 @@ type RaftState struct {
 
 	nextIndexes  []int
 	matchIndexes []int
-
-	lastIncludedEntryIndex int
-	lastIncludedEntryTerm  int
 
 	queue chan StateRequest
 }
@@ -76,35 +72,70 @@ func (rs *RaftState) setRole(r int) {
 	rs.role = r
 }
 
-func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
+// Does this index exist in the log
+func (rs *RaftState) indexExistWithNoLock(index int) bool {
 	offsettedLastIndex := index - rs.logBase
 
-	switch {
-	case offsettedLastIndex < 0 || offsettedLastIndex >= len(rs.Log):
-		DTPrintf("%d: logBase: %d, offset: %d, log size: %d\n", rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
-	case offsettedLastIndex == 0:
-		//DTPrintf("%d: logBase: %d, lastTerm: %d in getLogEntryTermWithNoLock\n", rs.me, rs.logBase, rs.lastIncludedEntryTerm)
-		return rs.lastIncludedEntryTerm
+	if offsettedLastIndex <= 0 {
+		DTPrintf("%d: [WARNING] logBase: %d, offset: %d, log size: %d\n",
+			rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
+
+		return false
 	}
 
-	return rs.Log[offsettedLastIndex].Term
+	return true
 }
 
-func (rs *RaftState) getLogEntryTerm(index int) int {
+func (rs *RaftState) indexExist(index int) bool {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.indexExistWithNoLock(index)
+}
+
+func (rs *RaftState) getLogEntryWithNoLock(index int) (RaftLogEntry, bool) {
+	if !rs.indexExistWithNoLock(index) {
+		return RaftLogEntry{}, false
+	}
+
+	return rs.Log[index-rs.logBase], true
+}
+
+func (rs *RaftState) getLogEntry(index int) (RaftLogEntry, bool) {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	return rs.getLogEntryWithNoLock(index)
+}
+
+func (rs *RaftState) getBaseLogEntryWithNoLock() (int, int) {
+	return rs.logBase, rs.Log[0].Term
+}
+
+func (rs *RaftState) getBaseLogEntry() (int, int) {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+
+	return rs.getBaseLogEntryWithNoLock()
+}
+
+func (rs *RaftState) getLogEntryTermWithNoLock(index int) (int, bool) {
+	entry, ok := rs.getLogEntryWithNoLock(index)
+	if !ok && index != rs.logBase {
+		return 0, false
+	}
+
+	if index == rs.logBase {
+		return rs.Log[0].Term, true
+	}
+
+	return entry.Term, true
+}
+
+func (rs *RaftState) getLogEntryTerm(index int) (int, bool) {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
 	return rs.getLogEntryTermWithNoLock(index)
-}
-
-func (rs *RaftState) getLogEntryWithNoLock(index int) RaftLogEntry {
-	return rs.Log[index-rs.logBase]
-}
-
-func (rs *RaftState) getLogEntry(index int) RaftLogEntry {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-	return rs.Log[index-rs.logBase]
 }
 
 func (rs *RaftState) getLogLenWithNoLock() int {
@@ -117,12 +148,6 @@ func (rs *RaftState) getLogLen() int {
 	return rs.getLogLenWithNoLock()
 }
 
-func (rs *RaftState) getLogSize() int {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-	return len(rs.Log)
-}
-
 func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 	stream := make(chan indexEntry)
 	go func() {
@@ -131,7 +156,7 @@ func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 		rs.rw.RLock()
 		defer rs.rw.RUnlock()
 
-		for i, l := range rs.Log {
+		for i, l := range rs.Log[1:] {
 			select {
 			case stream <- indexEntry{index: i + rs.logBase, entry: l}:
 			case <-done:
@@ -147,9 +172,11 @@ func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 func (rs *RaftState) truncateLog(deleteIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
-	if deleteIndex <= rs.logBase {
-		log.Fatal("invalid deleteIndex")
+
+	if !rs.indexExistWithNoLock(deleteIndex) {
+		panic("deleteIndex didn't exist")
 	}
+
 	rs.Log = rs.Log[:deleteIndex-rs.logBase]
 }
 
@@ -172,55 +199,61 @@ func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
 }
 
 // start: inclusive, end: exclusive
-func (rs *RaftState) getLogRangeWithNoLock(start int, end int) []RaftLogEntry {
+func (rs *RaftState) getLogRangeWithNoLock(start int, end int) ([]RaftLogEntry, bool) {
 	offStart, offEnd := start-rs.logBase, end-rs.logBase
-	return rs.Log[offStart:offEnd]
+	if !rs.indexExistWithNoLock(offStart) || !rs.indexExistWithNoLock(offEnd) {
+		return []RaftLogEntry{}, false
+	}
+
+	newEntries := []RaftLogEntry{}
+	newEntries = append(newEntries, rs.Log[offStart:offEnd]...)
+
+	return newEntries, true
 }
 
-func (rs *RaftState) getLogRange(start int, end int) []RaftLogEntry {
+func (rs *RaftState) getLogRange(start int, end int) ([]RaftLogEntry, bool) {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
-	offStart, offEnd := start-rs.logBase, end-rs.logBase
-	newEntries := []RaftLogEntry{}
-	newEntries = append(newEntries, rs.Log[offStart:offEnd]...)
-	return newEntries
+	return rs.getLogRangeWithNoLock(start, end)
 }
 
 // Discard log entries up to the lastIndex
-func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
+func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) bool {
 	if lastIndex == -1 {
 		lastIndex = rs.getLogLenWithNoLock() - 1
 	}
+
+	if !rs.indexExistWithNoLock(lastIndex) {
+		return false
+	}
+
 	DTPrintf("%d: before discarding. lastIndex: %d, logBase: %d, log: %+v\n",
 		rs.me, lastIndex, rs.logBase, rs.Log)
 
-	// Keep the nil head
-	rs.lastIncludedEntryIndex = lastIndex
-	rs.lastIncludedEntryTerm = rs.getLogEntryTermWithNoLock(lastIndex)
-
-	rs.Log = append(rs.Log[0:1], rs.Log[lastIndex+1-rs.logBase:]...)
+	rs.Log = rs.Log[lastIndex-rs.logBase:]
+	rs.Log[0].Command = nil
 	rs.logBase = lastIndex
 	DTPrintf("%d: logBase changed to %d in discard\n", rs.me, lastIndex)
+	return true
 }
 
 // Discard log entries up to the lastIndex
-func (rs *RaftState) discardLogEnries(lastIndex int) {
+func (rs *RaftState) discardLogEnries(lastIndex int) bool {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	rs.discardLogEnriesWithNoLock(lastIndex)
+	return rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
 func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	rs.lastIncludedEntryIndex = index
-	rs.lastIncludedEntryTerm = term
-
-	rs.logBase = index
-	DTPrintf("%d: logBase changed to %d in load\n", rs.me, index)
+	// XXX: index == rs.logBase
+	if index < rs.logBase {
+		panic("index is less than logBase")
+	}
 
 	rs.lastApplied = index
 	rs.commitIndex = index
@@ -313,49 +346,6 @@ func (rs *RaftState) initializeMatchAndNext() {
 	rs.rw.Unlock()
 }
 
-func (rs *RaftState) getLastIndex() int {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-	return rs.lastIncludedEntryIndex
-}
-
-func (rs *RaftState) getLastIndexWithNoLock() int {
-	return rs.lastIncludedEntryIndex
-}
-
-func (rs *RaftState) setLastIndex(i int) {
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
-	rs.lastIncludedEntryIndex = i
-}
-
-func (rs *RaftState) getLastTerm() int {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-	return rs.lastIncludedEntryTerm
-}
-
-func (rs *RaftState) getLastTermWithNoLock() int {
-	return rs.lastIncludedEntryTerm
-}
-
-func (rs *RaftState) setLastTerm(t int) {
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
-	rs.lastIncludedEntryTerm = t
-}
-
-// Is index > logBase ?
-func (rs *RaftState) indexExistWithNoLock(index int) bool {
-	return index > rs.logBase
-}
-
-func (rs *RaftState) indexExist(index int) bool {
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-	return index > rs.logBase
-}
-
 // return -1 if not found
 func (rs *RaftState) updateCommitIndex(term int) int {
 	rs.rw.Lock()
@@ -370,8 +360,8 @@ func (rs *RaftState) updateCommitIndex(term int) int {
 			}
 		}
 		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		if count > rs.numPeers/2 && n > rs.commitIndex &&
-			term == rs.getLogEntryTermWithNoLock(n) {
+		t, ok := rs.getLogEntryTermWithNoLock(n)
+		if count > rs.numPeers/2 && n > rs.commitIndex && ok && term == t {
 			rs.commitIndex = n
 			return n
 		}
@@ -391,13 +381,17 @@ func (rs *RaftState) appliedEntries() []ApplyMsg {
 		DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
 			rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
 
+		entry, ok := rs.getLogEntryWithNoLock(rs.lastApplied)
+		if !ok {
+			panic("entry doesn't exist")
+		}
+
 		entries = append(entries, ApplyMsg{
 			Index:   rs.lastApplied,
-			Command: rs.getLogEntryWithNoLock(rs.lastApplied).Command})
+			Command: entry.Command})
 	}
 
 	return entries
-
 }
 
 //
@@ -462,5 +456,6 @@ func (rs *RaftState) readSnapshot(persister *Persister) (int, int, []byte) {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
-	return rs.lastIncludedEntryIndex, rs.lastIncludedEntryTerm, persister.ReadSnapshot()
+	baseIndex, baseTerm := rs.getBaseLogEntryWithNoLock()
+	return baseIndex, baseTerm, persister.ReadSnapshot()
 }

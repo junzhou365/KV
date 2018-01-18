@@ -75,6 +75,10 @@ func (kv *RaftKV) run() {
 
 	getNextReq := func(index int) (req *Request) {
 		// msg must see the req that caused the msg
+		term, ok := kv.rf.GetLogEntryTerm(index)
+		if !ok {
+		}
+
 		for {
 			req = <-kv.queue
 			reqVal := <-req.valCh
@@ -84,7 +88,7 @@ func (kv *RaftKV) run() {
 				// Not the right msg. This msg was lagged
 				DTPrintf("%d: lagged msg %d\n", kv.me, index)
 
-			case reqVal.index == index && reqVal.term == kv.rf.GetLogEntryTerm(index):
+			case reqVal.index == index && reqVal.term == term:
 				return req
 
 			default:

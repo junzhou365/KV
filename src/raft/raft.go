@@ -21,7 +21,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"labrpc"
-	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -78,10 +77,8 @@ const (
 	LEADER
 )
 
-func (rf *Raft) GetLastIndexAndTerm() (index int, term int) {
-	index = rf.state.getLastIndex()
-	term = rf.state.getLastTerm()
-	return index, term
+func (rf *Raft) GetLastIndexAndTerm() (int, int) {
+	return rf.state.getBaseLogEntry()
 }
 
 func (rf *Raft) LoadSnapshotMetaData(index int, term int) {
@@ -96,11 +93,7 @@ func (rf *Raft) GetLogLen() int {
 	return rf.state.getLogLen()
 }
 
-func (rf *Raft) GetLogEntryTermWithNoLock(index int) int {
-	return rf.state.getLogEntryTermWithNoLock(index)
-}
-
-func (rf *Raft) GetLogEntryTerm(index int) int {
+func (rf *Raft) GetLogEntryTerm(index int) (int, bool) {
 	return rf.state.getLogEntryTerm(index)
 }
 
@@ -185,11 +178,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Is it most up-to-date?
 	logLen := rf.state.getLogLen()
 	lastLogIndex := logLen - 1
-	lastLogEntry := rf.state.getLogEntry(lastLogIndex)
+	lastTerm, _ := rf.state.getLogEntryTerm(lastLogIndex)
+
 	DTPrintf("%d received RequestVote RPC req %+v | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
 		rf.me, args, curVotedFor, lastLogIndex, logLen)
-	if logLen == 1 || args.LastLogTerm > lastLogEntry.Term ||
-		args.LastLogTerm == lastLogEntry.Term && args.LastLogIndex >= lastLogIndex {
+	if logLen == 1 || args.LastLogTerm > lastTerm ||
+		args.LastLogTerm == lastTerm && args.LastLogIndex >= lastLogIndex {
 		isEntryUpToDate = true
 	}
 
@@ -270,7 +264,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.state.getRole() == LEADER {
 		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n",
 			args.Term, rf.me)
-		log.Fatal("In AppendEntriesReply Dead!")
+		panic("Wrong Leader!")
 	}
 
 	rf.state.setRole(FOLLOWER)
@@ -282,21 +276,36 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = curTerm
 	logLen := rf.state.getLogLen()
 
-	updatedPrevLogIndex := args.PrevLogIndex
-	if lastIndex := rf.state.getLastIndex(); args.PrevLogIndex < lastIndex {
-		updatedPrevLogIndex = lastIndex
-	}
+	// args:      prev      last
+	//             |         |
+	// logs:   - - - - - - - - - -
+	//               | |         |
+	// local:     base 1st      last
 
-	switch {
-	// XXX: Need to rethink
-	case updatedPrevLogIndex > logLen-1:
+	if args.PrevLogIndex > logLen-1 {
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
+		return
+	}
 
-	case rf.state.getLogEntryTerm(updatedPrevLogIndex) != args.PrevLogTerm:
+	localPrevIndex := args.PrevLogIndex
+	localPrevTerm, ok := rf.state.getLogEntryTerm(localPrevIndex)
+	if !ok {
+		DTPrintf("%d: delayed Append RPC\n", rf.me)
+		localPrevIndex, localPrevTerm = rf.state.getBaseLogEntry()
+	}
+
+	if localPrevIndex > args.PrevLogIndex+len(args.Entries) {
+		// already consistent till last index
+		reply.Success = true
+		return
+	}
+
+	switch {
+	case localPrevTerm != args.PrevLogTerm:
 		reply.Success = false
-		reply.ConflictTerm = rf.state.getLogEntryTerm(updatedPrevLogIndex)
+		reply.ConflictTerm = localPrevTerm
 		// find the first entry that has the conflicting term
 		streamDone := make(chan interface{})
 		for l := range rf.state.logEntryStream(streamDone) {
@@ -310,23 +319,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	default:
 		reply.Success = true
-		deleteIndex := updatedPrevLogIndex + 1
-		for _, entry := range args.Entries {
-			switch {
-			case deleteIndex == logLen ||
-				rf.state.getLogEntryTerm(deleteIndex) != entry.Term:
+		deleteIndex := localPrevIndex + 1
+		// XXX: refactor
+		entries := args.Entries[localPrevIndex-args.PrevLogIndex:]
+		for _, entry := range entries {
+			if deleteIndex == logLen {
+				rf.state.truncateLog(deleteIndex)
+				rf.state.appendLogEntries(entries[deleteIndex-localPrevIndex-1:])
+				break
+			}
+
+			switch deleteTerm, ok := rf.state.getLogEntryTerm(deleteIndex); {
+
+			case !ok:
+				panic("deleteIndex was deleted")
+
+			case deleteTerm != entry.Term:
 				// delete conflicted entries
 				rf.state.truncateLog(deleteIndex)
-				rf.state.appendLogEntries(
-					args.Entries[deleteIndex-updatedPrevLogIndex-1:])
+				rf.state.appendLogEntries(entries[deleteIndex-localPrevIndex-1:])
 				break
-			default:
-				deleteIndex++
 			}
+
+			deleteIndex++
 		}
 		DTPrintf("%d: append entries succeeds. log len: %d\n", rf.me, rf.state.getLogLen())
 
-		lastNewEntryIndex := updatedPrevLogIndex + len(args.Entries)
+		lastNewEntryIndex := localPrevIndex + len(args.Entries)
 		if args.LeaderCommit > rf.state.getCommitIndex() {
 			commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
 			rf.state.setCommitIndex(commitIndex)
@@ -388,7 +407,7 @@ func (rf *Raft) InstallSnapshot(
 	resCh <- resp
 
 	// We have saved this snapshot
-	if args.LastIncludedEntryIndex <= rf.state.getLastIndex() {
+	if lastIndex, _ := rf.state.getBaseLogEntry(); args.LastIncludedEntryIndex <= lastIndex {
 		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
 		return
 	}
@@ -400,8 +419,9 @@ func (rf *Raft) InstallSnapshot(
 
 	// If lastIncludedEntry exists in log and we have applied it, then we could
 	// just delete up to that entry.
-	if rf.IndexValid(args.LastIncludedEntryIndex) &&
-		args.LastIncludedEntryTerm == rf.state.getLogEntryTerm(args.LastIncludedEntryIndex) &&
+	// XXX: refactor
+	if lastIndex, ok := rf.state.getLogEntryTerm(args.LastIncludedEntryIndex); ok &&
+		args.LastIncludedEntryTerm == lastIndex &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
 
 		rf.DiscardLogEnries(args.LastIncludedEntryIndex)

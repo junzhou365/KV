@@ -228,7 +228,8 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	jobDone := rf.Serialize("getAppendArgs")
 	defer close(jobDone)
 
-	if !rf.state.indexExist(newNext) {
+	prevTerm, ok := rf.state.getLogEntryTerm(newNext - 1)
+	if !ok {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 		return nil
 	}
@@ -236,12 +237,16 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	args = &AppendEntriesArgs{
 		Term:         term,
 		PrevLogIndex: newNext - 1,
-		PrevLogTerm:  rf.state.getLogEntryTerm(newNext - 1),
+		PrevLogTerm:  prevTerm,
 		LeaderCommit: rf.state.getCommitIndex()}
 
 	if !heartbeat {
-		args.Entries = append(args.Entries,
-			rf.state.getLogRange(newNext, newIndex+1)...)
+		newEntries, ok := rf.state.getLogRange(newNext, newIndex+1)
+		if !ok {
+			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
+			return nil
+		}
+		args.Entries = append(args.Entries, newEntries...)
 	}
 
 	return args
@@ -298,7 +303,8 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		j := newIndex
 		// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
 		for ; j > 0; j-- {
-			if rf.state.getLogEntryTerm(j) == reply.ConflictTerm {
+			entryTerm, ok := rf.state.getLogEntryTerm(j)
+			if !ok || ok && entryTerm == reply.ConflictTerm {
 				break
 			}
 		}
