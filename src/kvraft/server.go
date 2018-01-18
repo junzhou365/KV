@@ -107,6 +107,11 @@ func (kv *RaftKV) run() {
 
 			DTPrintf("%d: new raw msg, its index %d\n", kv.me, msg.Index)
 
+			msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
+			if !ok {
+				panic("")
+			}
+
 			// If we were leader but lost, even if we've applied change. Just
 			// retry. If we were follower but just gained leadership, there
 			// might be no reqs.
@@ -120,8 +125,7 @@ func (kv *RaftKV) run() {
 					kv.me, msg.Index)
 
 			// new leader, lagged msg
-			case term > kv.rf.GetLogEntryTerm(msg.Index):
-				// pass through
+			case term > msgTerm:
 
 			default:
 				req := getNextReq(msg.Index)
@@ -232,7 +236,6 @@ func (kv *RaftKV) commitOperation(op Op) interface{} {
 		valCh: make(chan RequestValue),
 		op:    &op}
 
-	DTPrintf("%d: new FUCK req %+v is created\n", kv.me, req)
 	kv.reqs <- req
 
 	cmd := <-req.resCh
@@ -325,7 +328,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(RaftKV)
 	kv.me = me
-	kv.maxraftstate = maxraftstate
+	kv.maxraftstate = 1
 	kv.stateDelta = 20
 	kv.maxRequests = 1000
 	kv.interval = 10 * time.Millisecond
@@ -353,8 +356,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 }
 
 func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
+	if kv.maxraftstate == -1 {
+		return
+	}
 	defer DTPrintf("%d: check for taking snapshot done for index: %d\n", kv.me, lastIndex)
-	// Take kv lock first
 
 	DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
 
@@ -378,7 +383,7 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 		kv.persister.SaveSnapshot(snapshot)
 	}
 
-	// It's okay to get raftstatesize without lock because msg is serialized
+	// The raft size might be reduced by raft taking snapshots. But it's ok.
 	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
 		if !kv.rf.IndexValid(lastIndex) {
 			DTPrintf("%d: new snapshot was given for %d. Just return\n", kv.me, lastIndex)
@@ -393,9 +398,11 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 		}
 
 		DTPrintf("%d: take snapshot\n", kv.me)
-		lastTerm := kv.rf.GetLogEntryTerm(lastIndex)
+		lastTerm, ok := kv.rf.GetLogEntryTerm(lastIndex)
+		if !ok {
+		}
 		// we must first save snapshot
 		takeSnapshot(lastIndex, lastTerm)
-		kv.rf.DiscardLogEnries(lastIndex)
+		go kv.rf.DiscardLogEnries(lastIndex)
 	}
 }

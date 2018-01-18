@@ -228,6 +228,7 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	jobDone := rf.Serialize("getAppendArgs")
 	defer close(jobDone)
 
+	DTPrintf("%d: try to get prev Term for %d\n", rf.me, newNext-1)
 	prevTerm, ok := rf.state.getLogEntryTerm(newNext - 1)
 	if !ok {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
@@ -241,6 +242,8 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 		LeaderCommit: rf.state.getCommitIndex()}
 
 	if !heartbeat {
+		DTPrintf("%d: try to get log range with newNext: %d, newIndex: %d\n",
+			rf.me, newNext, newIndex)
 		newEntries, ok := rf.state.getLogRange(newNext, newIndex+1)
 		if !ok {
 			DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)

@@ -81,11 +81,10 @@ func (rf *Raft) GetLastIndexAndTerm() (int, int) {
 	return rf.state.getBaseLogEntry()
 }
 
-func (rf *Raft) LoadSnapshotMetaData(index int, term int) {
-	rf.state.loadSnapshotMetaData(index, term)
-}
-
 func (rf *Raft) DiscardLogEnries(index int) {
+	jobDone := rf.Serialize("DiscardLogEnries")
+	defer close(jobDone)
+
 	rf.state.discardLogEnries(index)
 }
 
@@ -424,9 +423,9 @@ func (rf *Raft) InstallSnapshot(
 		args.LastIncludedEntryTerm == lastIndex &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
 
-		rf.DiscardLogEnries(args.LastIncludedEntryIndex)
+		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
 	} else {
-		rf.DiscardLogEnries(-1)
+		rf.state.discardLogEnries(-1)
 		r := bytes.NewBuffer(args.Data)
 		d := gob.NewDecoder(r)
 
@@ -436,7 +435,7 @@ func (rf *Raft) InstallSnapshot(
 		var lastEntryTerm int
 		d.Decode(&lastEntryTerm)
 
-		rf.LoadSnapshotMetaData(lastEntryIndex, lastEntryTerm)
+		rf.state.loadSnapshotMetaData(lastEntryIndex, lastEntryTerm)
 		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 	}
 

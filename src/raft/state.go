@@ -120,6 +120,7 @@ func (rs *RaftState) getBaseLogEntry() (int, int) {
 
 func (rs *RaftState) getLogEntryTermWithNoLock(index int) (int, bool) {
 	entry, ok := rs.getLogEntryWithNoLock(index)
+	DTPrintf("%d: ok: %t, index: %d\n", rs.me, ok, index)
 	if !ok && index != rs.logBase {
 		return 0, false
 	}
@@ -200,11 +201,13 @@ func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
 
 // start: inclusive, end: exclusive
 func (rs *RaftState) getLogRangeWithNoLock(start int, end int) ([]RaftLogEntry, bool) {
-	offStart, offEnd := start-rs.logBase, end-rs.logBase
-	if !rs.indexExistWithNoLock(offStart) || !rs.indexExistWithNoLock(offEnd) {
+	if !(rs.indexExistWithNoLock(start) &&
+		rs.indexExistWithNoLock(end-1) &&
+		start < end) {
 		return []RaftLogEntry{}, false
 	}
 
+	offStart, offEnd := start-rs.logBase, end-rs.logBase
 	newEntries := []RaftLogEntry{}
 	newEntries = append(newEntries, rs.Log[offStart:offEnd]...)
 
@@ -251,9 +254,15 @@ func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
 	defer rs.rw.Unlock()
 
 	// XXX: index == rs.logBase
-	if index < rs.logBase {
+	switch {
+	case index < rs.logBase:
 		panic("index is less than logBase")
+	case len(rs.Log) != 1:
+		panic("log is not fully discarded")
 	}
+
+	rs.logBase = index
+	rs.Log[0].Term = term
 
 	rs.lastApplied = index
 	rs.commitIndex = index
@@ -409,15 +418,14 @@ func (rs *RaftState) persist(persister *Persister) {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 
-	rs.rw.RLock()
-	defer rs.rw.RUnlock()
-
 	w := new(bytes.Buffer)
 	e := gob.NewEncoder(w)
+
+	rs.rw.RLock()
 	e.Encode(rs.CurrentTerm)
 	e.Encode(rs.VotedFor)
-
 	e.Encode(rs.Log)
+	rs.rw.RUnlock()
 
 	data := w.Bytes()
 	persister.SaveRaftState(data)
@@ -434,10 +442,10 @@ func (rs *RaftState) readPersist(persister *Persister) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
 
 	data := persister.ReadRaftState()
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		rs.CurrentTerm = 0
 		rs.VotedFor = -1
