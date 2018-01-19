@@ -95,14 +95,6 @@ func (rf *Raft) GetLogEntryTerm(index int) (int, bool) {
 	return rf.state.getLogEntryTerm(index)
 }
 
-func (rf *Raft) IndexExist(index int) bool {
-	return rf.state.indexExist(index)
-}
-
-func (rf *Raft) IndexValid(index int) bool {
-	return rf.state.indexExist(index) && index < rf.state.getLogLen()
-}
-
 // return CurrentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -406,7 +398,7 @@ func (rf *Raft) InstallSnapshot(
 	resCh <- resp
 
 	// We have saved this snapshot
-	if !rf.state.indexExist(args.LastIncludedEntryIndex) {
+	if rf.state.indexTrimmed(args.LastIncludedEntryIndex) {
 		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
 		return
 	}

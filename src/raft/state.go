@@ -72,28 +72,27 @@ func (rs *RaftState) setRole(r int) {
 	rs.role = r
 }
 
-// Does this index exist in the log
-func (rs *RaftState) indexExistWithNoLock(index int) bool {
+func (rs *RaftState) indexTrimmedWithNoLock(index int) bool {
 	offsettedLastIndex := index - rs.logBase
 
 	if offsettedLastIndex <= 0 {
 		DTPrintf("%d: [WARNING] logBase: %d, offset: %d, log size: %d\n",
 			rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
 
-		return false
+		return true
 	}
 
-	return true
+	return false
 }
 
-func (rs *RaftState) indexExist(index int) bool {
+func (rs *RaftState) indexTrimmed(index int) bool {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.indexExistWithNoLock(index)
+	return rs.indexTrimmedWithNoLock(index)
 }
 
 func (rs *RaftState) getLogEntryWithNoLock(index int) (RaftLogEntry, bool) {
-	if !rs.indexExistWithNoLock(index) {
+	if rs.indexTrimmedWithNoLock(index) {
 		return RaftLogEntry{}, false
 	}
 
@@ -173,7 +172,7 @@ func (rs *RaftState) truncateLog(deleteIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	if !rs.indexExistWithNoLock(deleteIndex) {
+	if rs.indexTrimmedWithNoLock(deleteIndex) {
 		DTPrintf("%d: truncate the log before %d", rs.me, deleteIndex)
 		panic("deleteIndex didn't exist")
 	}
@@ -201,9 +200,8 @@ func (rs *RaftState) appendLogEntry(entry RaftLogEntry) int {
 
 // start: inclusive, end: exclusive
 func (rs *RaftState) getLogRangeWithNoLock(start int, end int) ([]RaftLogEntry, bool) {
-	if !(rs.indexExistWithNoLock(start) &&
-		rs.indexExistWithNoLock(end-1) &&
-		start < end) {
+	if rs.indexTrimmedWithNoLock(start) || rs.indexTrimmedWithNoLock(end-1) ||
+		start >= end {
 		return []RaftLogEntry{}, false
 	}
 
@@ -227,7 +225,7 @@ func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) bool {
 		lastIndex = rs.getLogLenWithNoLock() - 1
 	}
 
-	if !rs.indexExistWithNoLock(lastIndex) {
+	if rs.indexTrimmedWithNoLock(lastIndex) {
 		return false
 	}
 
