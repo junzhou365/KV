@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	"bytes"
-	"encoding/gob"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -33,6 +31,7 @@ import (
 //
 type ApplyMsg struct {
 	Index       int
+	Term        int
 	Command     interface{}
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
@@ -321,9 +320,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		deleteIndex := localPrevIndex + 1
 		// XXX: refactor
 		entries := args.Entries[localPrevIndex-args.PrevLogIndex:]
+		DTPrintf("%d: entries: %v\n", rf.me, entries)
 		for _, entry := range entries {
+			// deleteIndex points to the end of the log
 			if deleteIndex == logLen {
-				rf.state.truncateLog(deleteIndex)
 				rf.state.appendLogEntries(entries[deleteIndex-localPrevIndex-1:])
 				break
 			}
@@ -425,17 +425,6 @@ func (rf *Raft) InstallSnapshot(
 
 		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
 	} else {
-		rf.state.discardLogEnries(-1)
-		r := bytes.NewBuffer(args.Data)
-		d := gob.NewDecoder(r)
-
-		var lastEntryIndex int
-		d.Decode(&lastEntryIndex)
-
-		var lastEntryTerm int
-		d.Decode(&lastEntryTerm)
-
-		rf.state.loadSnapshotMetaData(lastEntryIndex, lastEntryTerm)
 		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 	}
 

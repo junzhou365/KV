@@ -83,6 +83,12 @@ func (rs *RaftState) indexExistWithNoLock(index int) bool {
 		return false
 	}
 
+	if offsettedLastIndex >= len(rs.Log) {
+		DTPrintf("%d: [WARNING] logBase: %d, offset: %d, log size: %d\n",
+			rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
+		panic("offset is beyong log len")
+	}
+
 	return true
 }
 
@@ -175,6 +181,7 @@ func (rs *RaftState) truncateLog(deleteIndex int) {
 	defer rs.rw.Unlock()
 
 	if !rs.indexExistWithNoLock(deleteIndex) {
+		DTPrintf("%d: truncate the log before %d", rs.me, deleteIndex)
 		panic("deleteIndex didn't exist")
 	}
 
@@ -249,24 +256,24 @@ func (rs *RaftState) discardLogEnries(lastIndex int) bool {
 	return rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
-func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
-	rs.rw.Lock()
-	defer rs.rw.Unlock()
+//func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
+//rs.rw.Lock()
+//defer rs.rw.Unlock()
 
-	// XXX: index == rs.logBase
-	switch {
-	case index < rs.logBase:
-		panic("index is less than logBase")
-	case len(rs.Log) != 1:
-		panic("log is not fully discarded")
-	}
+//// XXX: index == rs.logBase
+//switch {
+//case index < rs.logBase:
+//panic("index is less than logBase")
+//case len(rs.Log) != 1:
+//panic("log is not fully discarded")
+//}
 
-	rs.logBase = index
-	rs.Log[0].Term = term
+//rs.logBase = index
+//rs.Log[0].Term = term
 
-	rs.lastApplied = index
-	rs.commitIndex = index
-}
+//rs.lastApplied = index
+//rs.commitIndex = index
+//}
 
 func (rs *RaftState) getCommitIndexWithNoLock() int {
 	return rs.commitIndex
@@ -397,6 +404,7 @@ func (rs *RaftState) appliedEntries() []ApplyMsg {
 
 		entries = append(entries, ApplyMsg{
 			Index:   rs.lastApplied,
+			Term:    entry.Term,
 			Command: entry.Command})
 	}
 
@@ -460,10 +468,16 @@ func (rs *RaftState) readPersist(persister *Persister) {
 	}
 }
 
-func (rs *RaftState) readSnapshot(persister *Persister) (int, int, []byte) {
+func (rs *RaftState) readSnapshot(persister *Persister) (
+	lastIndex int, lastTerm int, snapshot []byte) {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
-	baseIndex, baseTerm := rs.getBaseLogEntryWithNoLock()
-	return baseIndex, baseTerm, persister.ReadSnapshot()
+	snapshot = persister.ReadSnapshot()
+	r := bytes.NewBuffer(snapshot)
+	d := gob.NewDecoder(r)
+
+	d.Decode(&lastIndex)
+	d.Decode(&lastTerm)
+	return lastIndex, lastTerm, snapshot
 }

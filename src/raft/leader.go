@@ -194,12 +194,14 @@ LOOP:
 func (rf *Raft) sendSnapshot(done <-chan interface{}, i int, term int, next int) int {
 LOOP:
 	for {
-		args := rf.getSnapshotArgs(term, next)
 
-		if args == nil {
-			DTPrintf("%d: next %d exists for %d\n", rf.me, next, i)
-			return next
-		}
+		lastIndex, lastTerm, data := rf.state.readSnapshot(rf.persister)
+
+		args := &InstallSnapshotArgs{
+			Term: term,
+			LastIncludedEntryIndex: lastIndex,
+			LastIncludedEntryTerm:  lastTerm,
+			Data: data}
 
 		reply := &InstallSnapshotReply{}
 		DTPrintf("%d: sends Snapshot to %d, lastIndex: %d\n",
@@ -270,14 +272,14 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	shouldReturn, newEntries = false, false
 	nnewIndex, nnewNext = newIndex, newNext
 
-	if !heartbeat && !rf.state.indexExist(newIndex+1) {
-		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
-		shouldReturn = true
-	}
+	//if !heartbeat && !rf.state.indexExist(newIndex+1) {
+	//DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
+	//shouldReturn = true
+	//}
 
 	switch {
-	case shouldReturn:
-		// Pass through
+	//case shouldReturn:
+	// Pass through
 
 	case !reply.Success && reply.Term > term:
 		rf.state.setCurrentTerm(reply.Term)
@@ -303,7 +305,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	case !reply.Success && reply.ConflictTerm != -1:
 		// Find the last entry of the conflicting term. The conflicting
 		// server will delete all entries after this new newNext
-		j := newIndex
+		j := nnewIndex
 		// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
 		for ; j > 0; j-- {
 			entryTerm, ok := rf.state.getLogEntryTerm(j)
@@ -346,26 +348,6 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 	}
 
 	return shouldReturn, newEntries, nnewIndex, nnewNext
-}
-
-func (rf *Raft) getSnapshotArgs(term int, next int) (args *InstallSnapshotArgs) {
-
-	jobDone := rf.Serialize("getSnapshotArgs")
-	defer close(jobDone)
-
-	if rf.state.indexExist(next) {
-		return nil
-	}
-
-	lastIndex, lastTerm, data := rf.state.readSnapshot(rf.persister)
-
-	args = &InstallSnapshotArgs{
-		Term: term,
-		LastIncludedEntryIndex: lastIndex,
-		LastIncludedEntryTerm:  lastTerm,
-		Data: data}
-
-	return args
 }
 
 func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnapshotReply,

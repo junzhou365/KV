@@ -38,18 +38,14 @@ func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 		r := bytes.NewBuffer(snapshot)
 		d := gob.NewDecoder(r)
 
-		var lastEntryIndex int
-		d.Decode(&lastEntryIndex)
-
-		var lastEntryTerm int
-		d.Decode(&lastEntryTerm)
-
 		kv.state.rw.Lock()
+		d.Decode(&kv.state.lastIncludedIndex)
+		d.Decode(&kv.state.lastIncludedTerm)
 		d.Decode(&kv.state.Table)
 		d.Decode(&kv.state.Duplicates)
-		kv.state.rw.Unlock()
 
 		DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
-			kv.me, lastEntryIndex, lastEntryTerm)
+			kv.me, kv.state.lastIncludedIndex, kv.state.lastIncludedTerm)
+		kv.state.rw.Unlock()
 	}
 }

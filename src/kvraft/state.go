@@ -10,6 +10,9 @@ type KVState struct {
 	Table map[string]string
 
 	Duplicates map[int]Op
+
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 func (k *KVState) getValue(key string) (string, bool) {
@@ -42,4 +45,11 @@ func (k *KVState) setDup(id int, op Op) {
 	k.rw.Lock()
 	defer k.rw.Unlock()
 	k.Duplicates[id] = op
+}
+
+func (k *KVState) getLastIncludedIndex() int {
+	k.rw.RLock()
+	defer k.rw.RUnlock()
+
+	return k.lastIncludedIndex
 }

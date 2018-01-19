@@ -91,18 +91,13 @@ func (kv *RaftKV) run() {
 			return
 		}
 
-		msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
-		if !ok {
-			panic("msg.Index was lost")
-		}
-
 		switch {
-		case msgTerm == req.term:
+		case msg.Term == req.term:
 			req.resCh <- msg.Command
 			kv.delRequest(req.index)
 			DTPrintf("%d: req %+v succeed\n", kv.me, req)
 
-		case msgTerm > req.term:
+		case msg.Term > req.term:
 			kv.delRequest(req.index)
 			DTPrintf("%d: req %+v was lagged\n", kv.me, req)
 
@@ -119,14 +114,6 @@ func (kv *RaftKV) run() {
 	//       commitOperation side, req might also lag.
 	// 2. not found: pass
 	//
-	// old logic
-	// 1. if we are leader:
-	//	  a. we were leader, msg.Term == req.Term
-	//    b. we were follower, msg.Term < req.Term(new request was just inserted) or
-	//       requests[msg.Index] == nil. Clear all requests
-	// 2. if we are follower:
-	//    a. clear requests
-	//
 	// waiting for a msg
 	// 1. msg might lose. Polling the leadership state, 20 ms
 	//    a. keep waiting if we are leader
@@ -134,7 +121,7 @@ func (kv *RaftKV) run() {
 	for {
 		select {
 		case msg := <-kv.applyCh:
-			if index, _ := kv.rf.GetLastIndexAndTerm(); msg.Index > 0 && msg.Index <= index {
+			if index := kv.state.getLastIncludedIndex(); msg.Index > 0 && msg.Index <= index {
 				DTPrintf("%d: skip snapshotted msg %d\n", kv.me, msg.Index)
 				continue
 			}
@@ -152,7 +139,7 @@ func (kv *RaftKV) run() {
 
 			processMsg(msg)
 
-			kv.checkForTakingSnapshot(msg.Index)
+			kv.checkForTakingSnapshot(msg)
 
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -295,7 +282,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(RaftKV)
 	kv.me = me
-	kv.maxraftstate = -1
+	kv.maxraftstate = 1
 	kv.stateDelta = 20
 	kv.interval = 10 * time.Millisecond
 
@@ -320,25 +307,24 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	return kv
 }
 
-func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
+func (kv *RaftKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
 	if kv.maxraftstate == -1 {
 		return
 	}
-	defer DTPrintf("%d: check for taking snapshot done for index: %d\n", kv.me, lastIndex)
+	defer DTPrintf("%d: check for taking snapshot done for msg: %+v\n", kv.me, msg)
 
-	DTPrintf("%d: check for taking snapshot for index: %d\n", kv.me, lastIndex)
+	DTPrintf("%d: check for taking snapshot for msg: %+v\n", kv.me, msg)
 
 	takeSnapshot := func(lastIndex int, lastTerm int) {
-		DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
-		defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
+		//DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
+		//defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
 
 		w := new(bytes.Buffer)
 		e := gob.NewEncoder(w)
 
-		e.Encode(lastIndex)
-		e.Encode(lastTerm)
-
 		kv.state.rw.RLock()
+		e.Encode(kv.state.lastIncludedIndex)
+		e.Encode(kv.state.lastIncludedTerm)
 		e.Encode(kv.state.Table)
 		e.Encode(kv.state.Duplicates)
 		kv.state.rw.RUnlock()
@@ -350,8 +336,8 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 
 	// The raft size might be reduced by raft taking snapshots. But it's ok.
 	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
-		if !kv.rf.IndexValid(lastIndex) {
-			DTPrintf("%d: new snapshot was given for %d. Just return\n", kv.me, lastIndex)
+		if msg.Index <= kv.state.getLastIncludedIndex() {
+			DTPrintf("%d: new snapshot was given for %+v. Just return\n", kv.me, msg)
 			return
 			//if _, isLeader := kv.rf.GetState(); !isLeader {
 			//DTPrintf("%d: new snapshot was given for %d. Just return\n", kv.me, lastIndex)
@@ -363,11 +349,8 @@ func (kv *RaftKV) checkForTakingSnapshot(lastIndex int) {
 		}
 
 		DTPrintf("%d: take snapshot\n", kv.me)
-		lastTerm, ok := kv.rf.GetLogEntryTerm(lastIndex)
-		if !ok {
-		}
 		// we must first save snapshot
-		takeSnapshot(lastIndex, lastTerm)
-		go kv.rf.DiscardLogEnries(lastIndex)
+		takeSnapshot(msg.Index, msg.Term)
+		go kv.rf.DiscardLogEnries(msg.Index)
 	}
 }
