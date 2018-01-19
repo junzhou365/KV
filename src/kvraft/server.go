@@ -69,11 +69,6 @@ func (kv *RaftKV) delRequest(i int) {
 	delete(kv.liveRequests, i)
 }
 
-type MsgOp struct {
-	msg  raft.ApplyMsg
-	done chan interface{}
-}
-
 func (kv *RaftKV) run() {
 
 	clearRequests := func() {
@@ -87,7 +82,34 @@ func (kv *RaftKV) run() {
 		kv.liveRequests = make(map[int]*Request)
 	}
 
-	msgStream := kv.msgStream()
+	processMsg := func(msg raft.ApplyMsg) {
+		req, ok := kv.getRequest(msg.Index)
+
+		if !ok {
+			// No req for this msg
+			DTPrintf("%d: no req for the msg %d\n", kv.me, msg.Index)
+			return
+		}
+
+		msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
+		if !ok {
+			panic("msg.Index was lost")
+		}
+
+		switch {
+		case msgTerm == req.term:
+			req.resCh <- msg.Command
+			kv.delRequest(req.index)
+			DTPrintf("%d: req %+v succeed\n", kv.me, req)
+
+		case msgTerm > req.term:
+			kv.delRequest(req.index)
+			DTPrintf("%d: req %+v was lagged\n", kv.me, req)
+
+		default:
+			DTPrintf("%d: msg %d is lagged for req %+v\n", kv.me, msg.Index, req)
+		}
+	}
 
 	// get a msg
 	// 1. found in requests:
@@ -111,60 +133,7 @@ func (kv *RaftKV) run() {
 	//    b. clear all requests if we lost leadershp
 	for {
 		select {
-		case msgOp := <-msgStream:
-
-			msg := msgOp.msg
-
-			DTPrintf("%d: new raw msg, its index %d\n", kv.me, msg.Index)
-
-			req, ok := kv.getRequest(msg.Index)
-
-			if !ok {
-				// No req for this msg
-				DTPrintf("%d: no req for the msg %d\n", kv.me, msg.Index)
-				close(msgOp.done)
-				DTPrintf("%d: raw msg %d is done\n", kv.me, msg.Index)
-				continue
-			}
-
-			msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
-			if !ok {
-				panic("msg.Index was lost")
-			}
-
-			switch {
-			case msgTerm == req.term:
-				req.resCh <- msg.Command
-				kv.delRequest(req.index)
-				DTPrintf("%d: req %+v succeed\n", kv.me, req)
-
-			case msgTerm > req.term:
-				kv.delRequest(req.index)
-				DTPrintf("%d: req %+v was lagged\n", kv.me, req)
-
-			default:
-				DTPrintf("%d: msg %d is lagged for req %+v\n", kv.me, msg.Index, req)
-			}
-
-			close(msgOp.done)
-			DTPrintf("%d: raw msg %d is done\n", kv.me, msg.Index)
-
-		case <-time.After(kv.interval):
-			if _, isLeader := kv.rf.GetState(); !isLeader {
-				clearRequests()
-			}
-		}
-	}
-}
-
-// long-time running loop for server applying commands received from Raft
-func (kv *RaftKV) msgStream() <-chan MsgOp {
-	msgStream := make(chan MsgOp)
-
-	go func() {
-		defer close(msgStream)
-		for msg := range kv.applyCh {
-
+		case msg := <-kv.applyCh:
 			if index, _ := kv.rf.GetLastIndexAndTerm(); msg.Index > 0 && msg.Index <= index {
 				DTPrintf("%d: skip snapshotted msg %d\n", kv.me, msg.Index)
 				continue
@@ -176,43 +145,43 @@ func (kv *RaftKV) msgStream() <-chan MsgOp {
 				continue
 			}
 
-			DTPrintf("%d: new msg %+v\n", kv.me, msg)
-			op := msg.Command.(Op)
-			DTPrintf("%d: new msg. msg.Index: %d\n", kv.me, msg.Index)
+			DTPrintf("%d: new msg %d\n", kv.me, msg.Index)
 
-			// Duplicate Op
-			if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
-				msg.Command = resOp
-				//DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
-			} else {
+			newOp := kv.changeState(msg.Command.(Op))
+			msg.Command = newOp
 
-				switch op.Type {
-				case OP_GET:
-					// nonexistent value is ok
-					value, _ := kv.state.getValue(op.Key)
-					op.Value = value
-				case OP_PUT:
-					kv.state.setValue(op.Key, op.Value)
-				case OP_APPEND:
-					kv.state.appendValue(op.Key, op.Value)
-				}
-
-				kv.state.setDup(op.ClientId, op)
-				msg.Command = op
-				//DTPrintf("%d: new op: %+v, updated msg is %+v\n", kv.me, op, msg)
-			}
-
-			DTPrintf("%d: msg.Index: %d FUCK THIS SHIT\n", kv.me, msg.Index)
+			processMsg(msg)
 
 			kv.checkForTakingSnapshot(msg.Index)
-			msgOp := MsgOp{msg: msg, done: make(chan interface{})}
-			msgStream <- msgOp
-			<-msgOp.done
-			DTPrintf("%d: msgOp %d is done\n", kv.me, msg.Index)
-		}
-	}()
 
-	return msgStream
+		case <-time.After(kv.interval):
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				clearRequests()
+			}
+		}
+	}
+}
+
+func (kv *RaftKV) changeState(op Op) Op {
+	// Duplicate Op
+	if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
+		return resOp
+		//DTPrintf("%d: duplicate op: %+v\n", kv.me, resOp)
+	}
+
+	switch op.Type {
+	case OP_GET:
+		// nonexistent value is ok
+		value, _ := kv.state.getValue(op.Key)
+		op.Value = value
+	case OP_PUT:
+		kv.state.setValue(op.Key, op.Value)
+	case OP_APPEND:
+		kv.state.appendValue(op.Key, op.Value)
+	}
+
+	kv.state.setDup(op.ClientId, op)
+	return op
 }
 
 // invoke the agreement on operation.
