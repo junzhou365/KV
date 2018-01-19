@@ -311,23 +311,26 @@ func (kv *RaftKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
 	if kv.maxraftstate == -1 {
 		return
 	}
-	defer DTPrintf("%d: check for taking snapshot done for msg: %+v\n", kv.me, msg)
+	//defer DTPrintf("%d: check for taking snapshot done for msg: %+v\n", kv.me, msg)
 
-	DTPrintf("%d: check for taking snapshot for msg: %+v\n", kv.me, msg)
+	//DTPrintf("%d: check for taking snapshot for msg: %+v\n", kv.me, msg)
 
 	takeSnapshot := func(lastIndex int, lastTerm int) {
-		//DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
+		DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
 		//defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
 
 		w := new(bytes.Buffer)
 		e := gob.NewEncoder(w)
 
-		kv.state.rw.RLock()
+		kv.state.rw.Lock()
+		kv.state.lastIncludedIndex = lastIndex
+		kv.state.lastIncludedTerm = lastTerm
+
 		e.Encode(kv.state.lastIncludedIndex)
 		e.Encode(kv.state.lastIncludedTerm)
 		e.Encode(kv.state.Table)
 		e.Encode(kv.state.Duplicates)
-		kv.state.rw.RUnlock()
+		kv.state.rw.Unlock()
 
 		snapshot := w.Bytes()
 		// Protected by Serialize

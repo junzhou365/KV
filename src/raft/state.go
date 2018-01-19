@@ -83,12 +83,6 @@ func (rs *RaftState) indexExistWithNoLock(index int) bool {
 		return false
 	}
 
-	if offsettedLastIndex >= len(rs.Log) {
-		DTPrintf("%d: [WARNING] logBase: %d, offset: %d, log size: %d\n",
-			rs.me, rs.logBase, offsettedLastIndex, len(rs.Log))
-		panic("offset is beyong log len")
-	}
-
 	return true
 }
 
@@ -126,7 +120,6 @@ func (rs *RaftState) getBaseLogEntry() (int, int) {
 
 func (rs *RaftState) getLogEntryTermWithNoLock(index int) (int, bool) {
 	entry, ok := rs.getLogEntryWithNoLock(index)
-	DTPrintf("%d: ok: %t, index: %d\n", rs.me, ok, index)
 	if !ok && index != rs.logBase {
 		return 0, false
 	}

@@ -406,7 +406,7 @@ func (rf *Raft) InstallSnapshot(
 	resCh <- resp
 
 	// We have saved this snapshot
-	if lastIndex, _ := rf.state.getBaseLogEntry(); args.LastIncludedEntryIndex <= lastIndex {
+	if !rf.state.indexExist(args.LastIncludedEntryIndex) {
 		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
 		return
 	}
@@ -419,8 +419,13 @@ func (rf *Raft) InstallSnapshot(
 	// If lastIncludedEntry exists in log and we have applied it, then we could
 	// just delete up to that entry.
 	// XXX: refactor
-	if lastIndex, ok := rf.state.getLogEntryTerm(args.LastIncludedEntryIndex); ok &&
-		args.LastIncludedEntryTerm == lastIndex &&
+	lastBeyondLog := args.LastIncludedEntryIndex >= rf.state.getLogLen()-1
+	lastIndex, ok := rf.state.getLogEntryTerm(args.LastIncludedEntryIndex)
+	if !ok {
+		panic("snapshot was taken again")
+	}
+
+	if !lastBeyondLog && args.LastIncludedEntryTerm == lastIndex &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
 
 		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
