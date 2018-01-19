@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/gob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
 	"time"
@@ -21,15 +20,11 @@ type Op struct {
 	ClientId int
 }
 
-type RequestValue struct {
-	index int
-	term  int
-}
-
 type Request struct {
 	resCh chan interface{}
-	valCh chan RequestValue
 	op    *Op
+	index int
+	term  int
 }
 
 type RaftKV struct {
@@ -43,11 +38,35 @@ type RaftKV struct {
 	stateDelta   int
 
 	// Your definitions here.
-	state       KVState
-	queue       chan *Request
-	reqs        chan *Request
-	maxRequests int
-	interval    time.Duration
+	state        KVState
+	reqs         chan *Request
+	liveRequests map[int]*Request
+	interval     time.Duration
+}
+
+func (kv *RaftKV) getRequest(i int) (*Request, bool) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	req, ok := kv.liveRequests[i]
+	return req, ok
+}
+
+func (kv *RaftKV) putRequest(i int, req *Request) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.liveRequests[i] = req
+}
+
+func (kv *RaftKV) delRequest(i int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	req, ok := kv.liveRequests[i]
+	if !ok {
+		panic("req doesn't exist")
+	}
+	close(req.resCh)
+	delete(kv.liveRequests, i)
 }
 
 type MsgOp struct {
@@ -56,49 +75,40 @@ type MsgOp struct {
 }
 
 func (kv *RaftKV) run() {
-	go kv.serve()
 
-	drainQueue := func() {
-		for {
-			select {
-			case req := <-kv.queue:
-				DTPrintf("%d: drain the req %+v\n", kv.me, req)
-				<-req.valCh
-				req.resCh <- nil
-			default:
-				return
-			}
+	clearRequests := func() {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		for _, req := range kv.liveRequests {
+			DTPrintf("%d: drain the req %+v\n", kv.me, req)
+			close(req.resCh)
 		}
+
+		kv.liveRequests = make(map[int]*Request)
 	}
 
 	msgStream := kv.msgStream()
 
-	getNextReq := func(index int) (req *Request) {
-		// msg must see the req that caused the msg
-		term, ok := kv.rf.GetLogEntryTerm(index)
-		if !ok {
-		}
-
-		for {
-			req = <-kv.queue
-			reqVal := <-req.valCh
-			DTPrintf("%d: new req index %d, msg index is %d\n", kv.me, reqVal.index, index)
-			switch {
-			case reqVal.index > index:
-				// Not the right msg. This msg was lagged
-				DTPrintf("%d: lagged msg %d\n", kv.me, index)
-
-			case reqVal.index == index && reqVal.term == term:
-				return req
-
-			default:
-				// unsynced req
-				DTPrintf("%d: req.Index %d < msg.index %d\n", kv.me, reqVal.index, index)
-				log.Fatal("req.Index < index")
-			}
-		}
-	}
-
+	// get a msg
+	// 1. found in requests:
+	//    a. msg.Term == req.Term. Succeed
+	//    b. msg.Term < req.Term. msg is lagged
+	//    c. msg.Term > req.Term. req was old and not cleared. Clear it. On the
+	//       commitOperation side, req might also lag.
+	// 2. not found: pass
+	//
+	// old logic
+	// 1. if we are leader:
+	//	  a. we were leader, msg.Term == req.Term
+	//    b. we were follower, msg.Term < req.Term(new request was just inserted) or
+	//       requests[msg.Index] == nil. Clear all requests
+	// 2. if we are follower:
+	//    a. clear requests
+	//
+	// waiting for a msg
+	// 1. msg might lose. Polling the leadership state, 20 ms
+	//    a. keep waiting if we are leader
+	//    b. clear all requests if we lost leadershp
 	for {
 		select {
 		case msgOp := <-msgStream:
@@ -107,29 +117,33 @@ func (kv *RaftKV) run() {
 
 			DTPrintf("%d: new raw msg, its index %d\n", kv.me, msg.Index)
 
-			msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
+			req, ok := kv.getRequest(msg.Index)
+
 			if !ok {
-				panic("")
+				// No req for this msg
+				DTPrintf("%d: no req for the msg %d\n", kv.me, msg.Index)
+				close(msgOp.done)
+				DTPrintf("%d: raw msg %d is done\n", kv.me, msg.Index)
+				continue
 			}
 
-			// If we were leader but lost, even if we've applied change. Just
-			// retry. If we were follower but just gained leadership, there
-			// might be no reqs.
-			switch term, isLeader := kv.rf.GetState(); {
-			case !isLeader:
+			msgTerm, ok := kv.rf.GetLogEntryTerm(msg.Index)
+			if !ok {
+				panic("msg.Index was lost")
+			}
 
-				DTPrintf("%d: try to drain the queue for index %d because we are no longer leader\n",
-					kv.me, msg.Index)
-				drainQueue()
-				DTPrintf("%d: drained the queue for index %d because we are no longer leader\n",
-					kv.me, msg.Index)
+			switch {
+			case msgTerm == req.term:
+				req.resCh <- msg.Command
+				kv.delRequest(req.index)
+				DTPrintf("%d: req %+v succeed\n", kv.me, req)
 
-			// new leader, lagged msg
-			case term > msgTerm:
+			case msgTerm > req.term:
+				kv.delRequest(req.index)
+				DTPrintf("%d: req %+v was lagged\n", kv.me, req)
 
 			default:
-				req := getNextReq(msg.Index)
-				req.resCh <- msg.Command
+				DTPrintf("%d: msg %d is lagged for req %+v\n", kv.me, msg.Index, req)
 			}
 
 			close(msgOp.done)
@@ -137,7 +151,7 @@ func (kv *RaftKV) run() {
 
 		case <-time.After(kv.interval):
 			if _, isLeader := kv.rf.GetState(); !isLeader {
-				drainQueue()
+				clearRequests()
 			}
 		}
 	}
@@ -201,44 +215,28 @@ func (kv *RaftKV) msgStream() <-chan MsgOp {
 	return msgStream
 }
 
-func (kv *RaftKV) serve() {
-	for req := range kv.reqs {
-		index, term, isLeader := kv.rf.Start(*req.op)
-		if !isLeader {
-			req.resCh <- true
-			DTPrintf("%d: not leader for op %+v. return from serve()\n", kv.me, *req.op)
-			continue
-		}
-
-		DTPrintf("%d: Server handles op: %+v. The req index is %d\n",
-			kv.me, *req.op, index)
-		// we must serialize this feeding req because otherwise reqs are in
-		// wrong order
-		kv.queue <- req
-		DTPrintf("%d: put new req %+v\n", kv.me, req)
-
-		// provide the value in the future
-		go func(req *Request) {
-			val := RequestValue{index: index, term: term}
-			req.valCh <- val
-			DTPrintf("%d: val %+v is put to req %+v\n", kv.me, val, req)
-		}(req)
-
-	}
-}
-
 // invoke the agreement on operation.
 // return applied Op and WrongLeader
 func (kv *RaftKV) commitOperation(op Op) interface{} {
-	// The Start() and putting req to the queue must be done atomically
+	index, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		return true
+	}
+
 	req := &Request{
 		resCh: make(chan interface{}),
-		valCh: make(chan RequestValue),
-		op:    &op}
+		op:    &op,
+		index: index,
+		term:  term}
 
-	kv.reqs <- req
+	if oldReq, ok := kv.getRequest(index); ok {
+		DTPrintf("%d: outdated req %+v was not cleared\n", kv.me, oldReq)
+		kv.delRequest(index)
+	}
 
+	kv.putRequest(index, req)
 	cmd := <-req.resCh
+
 	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
 	if cmd == nil {
 		return Err("Leader role lost")
@@ -328,9 +326,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(RaftKV)
 	kv.me = me
-	kv.maxraftstate = 1
+	kv.maxraftstate = -1
 	kv.stateDelta = 20
-	kv.maxRequests = 1000
 	kv.interval = 10 * time.Millisecond
 
 	// You may need initialization code here.
@@ -341,7 +338,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.queue = make(chan *Request, kv.maxRequests)
 	kv.reqs = make(chan *Request)
 
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

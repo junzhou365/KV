@@ -348,7 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.LeaderCommit > rf.state.getCommitIndex() {
 			commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
 			rf.state.setCommitIndex(commitIndex)
-			go func() { rf.commit <- commitIndex }()
+			rf.commit <- commitIndex
 		}
 	}
 }

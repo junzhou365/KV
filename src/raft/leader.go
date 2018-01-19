@@ -335,7 +335,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 
 		commitIndex := rf.state.updateCommitIndex(term)
 		if commitIndex != -1 {
-			go func() { rf.commit <- commitIndex }()
+			rf.commit <- commitIndex
 		}
 
 		shouldReturn = true
