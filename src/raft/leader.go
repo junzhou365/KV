@@ -332,8 +332,10 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 
 	case reply.Success:
 		iMatch := args.PrevLogIndex + len(args.Entries)
-		rf.state.setMatchIndex(i, iMatch)
-		DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+		if iMatch > rf.state.getMatchIndex(i) {
+			rf.state.setMatchIndex(i, iMatch)
+			DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+		}
 
 		iNext := newNext + len(args.Entries)
 		rf.state.setNextIndex(i, iNext)
@@ -372,8 +374,10 @@ func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnap
 		}
 
 	default:
-		// If succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
-		rf.state.setMatchIndex(i, args.LastIncludedEntryIndex)
+		// succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.
+		if args.LastIncludedEntryIndex > rf.state.getMatchIndex(i) {
+			rf.state.setMatchIndex(i, args.LastIncludedEntryIndex)
+		}
 
 		iMatch := rf.state.getMatchIndex(i)
 		rf.state.setNextIndex(i, iMatch+1)

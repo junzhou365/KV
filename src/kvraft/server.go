@@ -354,6 +354,6 @@ func (kv *RaftKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
 		DTPrintf("%d: take snapshot\n", kv.me)
 		// we must first save snapshot
 		takeSnapshot(msg.Index, msg.Term)
-		go kv.rf.DiscardLogEnries(msg.Index)
+		go kv.rf.DiscardLogEnries(msg.Index, msg.Term)
 	}
 }

@@ -54,7 +54,6 @@ type Raft struct {
 	rpcCh             chan chan rpcResp
 	heartbeatInterval time.Duration
 	commit            chan int
-	snapshotCh        chan ApplyMsg
 	applyCh           chan ApplyMsg
 	newEntry          chan int
 	//sendChs           []chan sendJob
@@ -76,7 +75,7 @@ const (
 	LEADER
 )
 
-func (rf *Raft) DiscardLogEnries(index int) {
+func (rf *Raft) DiscardLogEnries(index int, term int) {
 	jobDone := rf.Serialize("DiscardLogEnries")
 	defer close(jobDone)
 
@@ -84,11 +83,11 @@ func (rf *Raft) DiscardLogEnries(index int) {
 	if rf.state.indexTrimmed(index) {
 		return
 	}
-	rf.state.discardLogEnries(index)
+	rf.state.discardLogEnries(index, term)
 }
 
 func (rf *Raft) LoadBaseLogEntry(index int, term int) {
-	jobDone := rf.Serialize("DiscardLogEnries")
+	jobDone := rf.Serialize("LoadBaseLogEntry")
 	defer close(jobDone)
 
 	rf.state.loadBaseLogEntry(index, term)
@@ -213,6 +212,13 @@ func min(a int, b int) int {
 	return b
 }
 
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	DTPrintf("%d: get Append for term %d from leader. prevIndex: %d, len of entris: %d\n",
 		rf.me, args.Term, args.PrevLogIndex, len(args.Entries))
@@ -275,7 +281,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
-		DTPrintf("%d: log base: %d\n", rf.me, rf.state.logBase)
+		DTPrintf("%d: doesn't have the prevIndex: %d. log base: %d\n",
+			rf.me, args.PrevLogIndex, rf.state.logBase)
 		return
 	}
 
@@ -290,6 +297,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if localPrevIndex > args.PrevLogIndex+len(args.Entries) {
 		// already consistent till last index
+		DTPrintf("%d: already consistent till prevIndex: %d. log base: %d\n",
+			rf.me, args.PrevLogIndex, rf.state.logBase)
 		reply.Success = true
 		return
 	}
@@ -301,6 +310,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// find the first entry that has the conflicting term
 		streamDone := make(chan interface{})
 		for l := range rf.state.logEntryStream(streamDone) {
+			DTPrintf("%d: compare %v to term: %d\n", l, localPrevTerm)
 			index, entry := l.index, l.entry
 			if entry.Term == reply.ConflictTerm {
 				reply.ConflictIndex = index
@@ -308,6 +318,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				break
 			}
 		}
+		if reply.ConflictIndex == 0 {
+			panic("Did not find the conflictIndex")
+		}
+
+		DTPrintf("%d: conflict local term %d with arg term %d. Found first conflict index: %d\n",
+			rf.me, localPrevTerm, args.PrevLogTerm, reply.ConflictIndex)
 
 	default:
 		reply.Success = true
@@ -331,11 +347,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			deleteIndex++
 		}
-		DTPrintf("%d: append entries succeeds. log len: %d\n", rf.me, rf.state.getLogLen())
+		DTPrintf("%d: append entries succeeds. log len: %d, commitIndex: %d\n",
+			rf.me, rf.state.getLogLen(), rf.state.getCommitIndex())
 
 		lastNewEntryIndex := localPrevIndex + len(args.Entries)
-		if args.LeaderCommit > rf.state.getCommitIndex() {
-			commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
+		commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
+		//if args.LeaderCommit > rf.state.getCommitIndex() { }
+		if rf.state.getCommitIndex() < commitIndex {
 			rf.state.setCommitIndex(commitIndex)
 			rf.commit <- commitIndex
 		}
@@ -408,7 +426,8 @@ func (rf *Raft) InstallSnapshot(
 
 	lastBeyondLog := args.LastIncludedEntryIndex >= rf.state.getLogLen()-1
 	if lastBeyondLog {
-		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
+		rf.state.discardLogEnries(
+			args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
 		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 		return
 	}
@@ -420,9 +439,11 @@ func (rf *Raft) InstallSnapshot(
 	if args.LastIncludedEntryTerm == lastIndex &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
 
-		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
+		rf.state.discardLogEnries(
+			args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
 	} else {
-		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
+		rf.state.discardLogEnries(
+			args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
 		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 	}
 
@@ -440,11 +461,6 @@ func (rf *Raft) commitLoop() {
 				DTPrintf("%d: applied at log index %d the command %+v\n",
 					rf.me, entry.Index, entry.Command)
 			}
-
-		case msg := <-rf.snapshotCh:
-			msg.SavedCh = make(chan interface{})
-			rf.applyCh <- msg
-			<-msg.SavedCh
 		}
 	}
 }
@@ -545,7 +561,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.newEntry = make(chan int)
 
 	rf.commit = make(chan int)
-	rf.snapshotCh = make(chan ApplyMsg, 1)
 	rf.applyCh = applyCh
 
 	go rf.state.stateLoop()

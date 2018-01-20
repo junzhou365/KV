@@ -135,6 +135,9 @@ func (rs *RaftState) loadBaseLogEntry(index int, term int) {
 
 	rs.logBase = index
 	rs.Log[0].Term = term
+
+	rs.commitIndex = index
+	rs.lastApplied = index
 }
 
 func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
@@ -171,6 +174,9 @@ func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 
 		rs.rw.RLock()
 		defer rs.rw.RUnlock()
+
+		DTPrintf("%d: in logEntryStream, logbase is %d, log: %v\n",
+			rs.me, rs.logBase, rs.Log)
 
 		for i, l := range rs.Log[1:] {
 			select {
@@ -238,7 +244,7 @@ func (rs *RaftState) getLogRange(start int, end int) ([]RaftLogEntry, bool) {
 
 // Discard log entries up to the lastIndex. lastIndex must not be trimmed
 // lastIndex: -1, entire log
-func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
+func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int, lastTerm int) {
 	if rs.indexTrimmedWithNoLock(lastIndex) {
 		DTPrintf("%d: lastIndex: %d doesn't exist, logbase: %d\n",
 			rs.me, lastIndex, rs.logBase)
@@ -249,12 +255,14 @@ func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 		rs.me, lastIndex, rs.logBase, rs.Log)
 
 	if lastIndex >= rs.getLogLenWithNoLock() {
-		rs.Log = rs.Log[rs.getLogLenWithNoLock()-1:]
+		// Keep the last index
+		rs.Log = rs.Log[len(rs.Log)-1:]
 	} else {
 		rs.Log = rs.Log[lastIndex-rs.logBase:]
 	}
 
 	rs.Log[0].Command = nil
+	rs.Log[0].Term = lastTerm
 	rs.logBase = lastIndex
 
 	if rs.commitIndex < rs.logBase {
@@ -268,57 +276,64 @@ func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 }
 
 // Discard log entries up to the lastIndex
-func (rs *RaftState) discardLogEnries(lastIndex int) {
+func (rs *RaftState) discardLogEnries(lastIndex int, lastTerm int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	rs.discardLogEnriesWithNoLock(lastIndex)
+	rs.discardLogEnriesWithNoLock(lastIndex, lastTerm)
 }
 
-//func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
-//rs.rw.Lock()
-//defer rs.rw.Unlock()
-
-//// XXX: index == rs.logBase
-//switch {
-//case index < rs.logBase:
-//panic("index is less than logBase")
-//case len(rs.Log) != 1:
-//panic("log is not fully discarded")
-//}
-
-//rs.logBase = index
-//rs.Log[0].Term = term
-
-//rs.lastApplied = index
-//rs.commitIndex = index
-//}
-
 func (rs *RaftState) getCommitIndexWithNoLock() int {
+	//return max(rs.commitIndex, rs.logBase)
 	return rs.commitIndex
 }
 
 func (rs *RaftState) getCommitIndex() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.commitIndex
+
+	return rs.getCommitIndexWithNoLock()
 }
 
 func (rs *RaftState) setCommitIndex(c int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
+
+	if rs.indexTrimmedWithNoLock(c) {
+		panic("")
+	}
+
+	if rs.commitIndex >= c {
+		panic("commitIndex must increase")
+	}
+
 	rs.commitIndex = c
+}
+
+func (rs *RaftState) getLastAppliedWithNoLock() int {
+	//return max(rs.lastApplied, rs.logBase)
+	return rs.lastApplied
 }
 
 func (rs *RaftState) getLastApplied() int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.lastApplied
+
+	return rs.getLastAppliedWithNoLock()
 }
 
 func (rs *RaftState) setLastApplied(a int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
+
+	if rs.indexTrimmedWithNoLock(a) {
+		panic("")
+	}
+
+	if rs.lastApplied >= a {
+		panic("lastApplied must increase")
+	}
+
 	rs.lastApplied = a
 }
 
@@ -365,9 +380,10 @@ func (rs *RaftState) setMatchIndex(i int, m int) {
 }
 
 func (rs *RaftState) setMatchIndexWithNoLock(i int, m int) {
-	if m > rs.matchIndexes[i] {
-		rs.matchIndexes[i] = m
+	if m <= rs.matchIndexes[i] {
+		panic("match must increase")
 	}
+	rs.matchIndexes[i] = m
 }
 
 func (rs *RaftState) initializeMatchAndNext() {
@@ -387,16 +403,22 @@ func (rs *RaftState) updateCommitIndex(term int) int {
 	defer rs.rw.Unlock()
 
 	logLen := rs.getLogLenWithNoLock()
-	for n := logLen - 1; n > rs.commitIndex; n-- {
+	DTPrintf("%d: the commitIndex in updateCommitIndex is %d\n", rs.me, rs.commitIndex)
+
+	baseCommitIndex := max(rs.commitIndex, rs.logBase)
+	for n := logLen - 1; n > baseCommitIndex; n-- {
 		count := 1
 		for j := 0; j < rs.numPeers; j++ {
 			if j != rs.me && rs.matchIndexes[j] >= n {
 				count++
 			}
 		}
-		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
+		DTPrintf("%d: the count is %d, n is %d. logbase: %d, log len: %d",
+			rs.me, count, n, rs.logBase, rs.getLogLenWithNoLock())
 		t := rs.getLogEntryTermWithNoLock(n)
 		if count > rs.numPeers/2 && n > rs.commitIndex && term == t {
+			DTPrintf("%d: the commitIndex in updateCommitIndex %d is finally set to %d\n",
+				rs.me, rs.commitIndex, n)
 			rs.commitIndex = n
 			return n
 		}
@@ -483,6 +505,10 @@ func (rs *RaftState) readPersist(persister *Persister) {
 		d.Decode(&rs.VotedFor)
 		d.Decode(&rs.logBase)
 		d.Decode(&rs.Log)
+
+		rs.commitIndex = rs.logBase
+		rs.lastApplied = rs.logBase
+		DTPrintf("%d: commitIndex and lastApplied are updated to base\n", rs.me)
 	}
 }
 
