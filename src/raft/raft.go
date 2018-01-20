@@ -54,6 +54,7 @@ type Raft struct {
 	state             RaftState
 	rpcCh             chan chan rpcResp
 	heartbeatInterval time.Duration
+	retryInterval     time.Duration
 	commit            chan int
 	applyCh           chan ApplyMsg
 	newEntry          chan int
@@ -288,18 +289,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	localPrevIndex := args.PrevLogIndex
-	var localPrevTerm int
-	if rf.state.indexTrimmed(localPrevIndex) {
-		DTPrintf("%d: delayed Append RPC\n", rf.me)
-		localPrevIndex, localPrevTerm = rf.state.getBaseLogEntry()
-	} else {
-		localPrevTerm = rf.state.getLogEntryTerm(localPrevIndex)
+	if rf.state.baseIndexTrimmed(localPrevIndex) {
+		//DTPrintf("%d: delayed Append RPC\n", rf.me)
+		reply.Success = false
+		reply.ConflictIndex = logLen
+		reply.ConflictTerm = -1
+		DTPrintf("%d: doesn't have the prevIndex: %d. log base: %d, log len: %d\n",
+			rf.me, args.PrevLogIndex, rf.state.logBase, logLen)
+		return
 	}
+
+	localPrevTerm := rf.state.getLogEntryTerm(localPrevIndex)
 
 	if localPrevIndex > args.PrevLogIndex+len(args.Entries) {
 		// already consistent till last index
-		DTPrintf("%d: already consistent till prevIndex: %d. log base: %d\n",
-			rf.me, args.PrevLogIndex, rf.state.logBase)
+		//DTPrintf("%d: already consistent till prevIndex: %d. log base: %d\n",
+		//rf.me, args.PrevLogIndex, rf.state.logBase)
 		reply.Success = true
 		return
 	}
@@ -311,7 +316,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// find the first entry that has the conflicting term
 		streamDone := make(chan interface{})
 		for l := range rf.state.logEntryStream(streamDone) {
-			DTPrintf("%d: compare %v to term: %d\n", rf.me, l, localPrevTerm)
+			//DTPrintf("%d: compare %v to term: %d\n", rf.me, l, localPrevTerm)
 			index, entry := l.index, l.entry
 			if entry.Term == reply.ConflictTerm {
 				reply.ConflictIndex = index
@@ -320,7 +325,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if reply.ConflictIndex == 0 {
-			panic(fmt.Sprintf("%d: Did not find the conflictIndex for conflict term %d",
+			panic(fmt.Sprintf("%d: Did not find the conflictIndex for conflict term %d\n",
 				rf.me, localPrevTerm))
 		}
 
@@ -332,7 +337,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		deleteIndex := localPrevIndex + 1
 		// XXX: refactor
 		entries := args.Entries[localPrevIndex-args.PrevLogIndex:]
-		DTPrintf("%d: entries: %v\n", rf.me, entries)
+		//DTPrintf("%d: entries: %v\n", rf.me, entries)
 		for _, entry := range entries {
 			// deleteIndex points to the end of the log
 			if deleteIndex == logLen {
@@ -349,8 +354,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			deleteIndex++
 		}
-		DTPrintf("%d: append entries succeeds. log len: %d, commitIndex: %d\n",
-			rf.me, rf.state.getLogLen(), rf.state.getCommitIndex())
+		//DTPrintf("%d: append entries succeeds. log len: %d, commitIndex: %d\n",
+		//rf.me, rf.state.getLogLen(), rf.state.getCommitIndex())
 
 		lastNewEntryIndex := localPrevIndex + len(args.Entries)
 		commitIndex := min(args.LeaderCommit, lastNewEntryIndex)
@@ -416,7 +421,7 @@ func (rf *Raft) InstallSnapshot(
 
 	// We have saved this snapshot
 	if rf.state.indexTrimmed(args.LastIncludedEntryIndex) {
-		DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
+		//DTPrintf("%d: re-ordered snapshot request: %d\n", rf.me, args.LastIncludedEntryIndex)
 		return
 	}
 
@@ -424,13 +429,19 @@ func (rf *Raft) InstallSnapshot(
 	//rf.state.lastIncludedEntryIndex, rf.state.getLogLenWithNoLock())
 
 	// XXX: save need to confirm
-	rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data}
+	savedCh := make(chan interface{})
+	rf.applyCh <- ApplyMsg{
+		UseSnapshot: false, Snapshot: args.Data, SavedCh: savedCh}
+	<-savedCh
 
 	lastBeyondLog := args.LastIncludedEntryIndex >= rf.state.getLogLen()-1
 	if lastBeyondLog {
 		rf.state.discardLogEnries(
 			args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
-		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
+		savedCh := make(chan interface{})
+		rf.applyCh <- ApplyMsg{
+			UseSnapshot: true, Snapshot: args.Data, SavedCh: savedCh}
+		<-savedCh
 		return
 	}
 
@@ -446,7 +457,10 @@ func (rf *Raft) InstallSnapshot(
 	} else {
 		rf.state.discardLogEnries(
 			args.LastIncludedEntryIndex, args.LastIncludedEntryTerm)
-		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
+		savedCh := make(chan interface{})
+		rf.applyCh <- ApplyMsg{
+			UseSnapshot: true, Snapshot: args.Data, SavedCh: savedCh}
+		<-savedCh
 	}
 
 }
@@ -457,11 +471,11 @@ func (rf *Raft) commitLoop() {
 		case <-rf.commit:
 			entries := rf.state.appliedEntries()
 			for _, entry := range entries {
-				DTPrintf("%d: try to apply at log index %d the command %+v\n",
-					rf.me, entry.Index, entry.Command)
+				//DTPrintf("%d: try to apply at log index %d the command %+v\n",
+				//rf.me, entry.Index, entry.Command)
 				rf.applyCh <- entry
-				DTPrintf("%d: applied at log index %d the command %+v\n",
-					rf.me, entry.Index, entry.Command)
+				//DTPrintf("%d: applied at log index %d the command %+v\n",
+				//rf.me, entry.Index, entry.Command)
 			}
 		}
 	}
@@ -559,6 +573,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state.setRole(FOLLOWER)
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
+	rf.retryInterval = 20 * time.Millisecond      // max number test permits
 	rf.rpcCh = make(chan chan rpcResp)
 	rf.newEntry = make(chan int)
 

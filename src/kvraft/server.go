@@ -75,7 +75,7 @@ func (kv *RaftKV) run() {
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		for _, req := range kv.liveRequests {
-			DTPrintf("%d: drain the req %+v\n", kv.me, req)
+			//DTPrintf("%d: drain the req %+v\n", kv.me, req)
 			close(req.resCh)
 		}
 
@@ -87,7 +87,7 @@ func (kv *RaftKV) run() {
 
 		if !ok {
 			// No req for this msg
-			DTPrintf("%d: no req for the msg %d\n", kv.me, msg.Index)
+			//DTPrintf("%d: no req for the msg %d\n", kv.me, msg.Index)
 			return
 		}
 
@@ -95,14 +95,14 @@ func (kv *RaftKV) run() {
 		case msg.Term == req.term:
 			req.resCh <- msg.Command
 			kv.delRequest(req.index)
-			DTPrintf("%d: req %+v succeed\n", kv.me, req)
+			//DTPrintf("%d: req %+v succeed\n", kv.me, req)
 
 		case msg.Term > req.term:
 			kv.delRequest(req.index)
-			DTPrintf("%d: req %+v was lagged\n", kv.me, req)
+			//DTPrintf("%d: req %+v was lagged\n", kv.me, req)
 
 		default:
-			DTPrintf("%d: msg %d is lagged for req %+v\n", kv.me, msg.Index, req)
+			//DTPrintf("%d: msg %d is lagged for req %+v\n", kv.me, msg.Index, req)
 		}
 	}
 
@@ -128,7 +128,7 @@ func (kv *RaftKV) run() {
 
 			if msg.Snapshot != nil {
 				kv.saveOrRestoreSnapshot(msg.Snapshot, msg.UseSnapshot)
-				//close(msg.SavedCh)
+				close(msg.SavedCh)
 				continue
 			}
 
@@ -185,15 +185,15 @@ func (kv *RaftKV) commitOperation(op Op) interface{} {
 		index: index,
 		term:  term}
 
-	if oldReq, ok := kv.getRequest(index); ok {
-		DTPrintf("%d: outdated req %+v was not cleared\n", kv.me, oldReq)
+	if _, ok := kv.getRequest(index); ok {
+		//DTPrintf("%d: outdated req %+v was not cleared\n", kv.me, oldReq)
 		kv.delRequest(index)
 	}
 
 	kv.putRequest(index, req)
 	cmd := <-req.resCh
 
-	DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
+	//DTPrintf("%d: cmd from commitOperation is %+v\n", kv.me, cmd)
 	if cmd == nil {
 		return Err("Leader role lost")
 	}
@@ -202,7 +202,7 @@ func (kv *RaftKV) commitOperation(op Op) interface{} {
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	DTPrintf("%d: Server [Get], args: %+v\n", kv.me, args)
+	//DTPrintf("%d: Server [Get], args: %+v\n", kv.me, args)
 
 	op := Op{
 		Seq:      args.State.Seq,
@@ -221,12 +221,12 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 		reply.Value = ret.(Op).Value
 	}
 
-	DTPrintf("%d: Server [Get], for key %s, reply: %+v\n", kv.me, args.Key, reply)
+	//DTPrintf("%d: Server [Get], for key %s, reply: %+v\n", kv.me, args.Key, reply)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	DTPrintf("%d: Server [PutAppend], args: %+v\n", kv.me, args)
+	//DTPrintf("%d: Server [PutAppend], args: %+v\n", kv.me, args)
 
 	opType := OP_PUT
 	if args.Op == "Append" {
@@ -248,7 +248,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ret.(Err)
 	}
 
-	DTPrintf("%d: Server [PutAppend], reply: %+v\n", kv.me, reply)
+	//DTPrintf("%d: Server [PutAppend], reply: %+v\n", kv.me, reply)
 }
 
 //
@@ -316,7 +316,7 @@ func (kv *RaftKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
 	//DTPrintf("%d: check for taking snapshot for msg: %+v\n", kv.me, msg)
 
 	takeSnapshot := func(lastIndex int, lastTerm int) {
-		DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
+		//DTPrintf("%d: taking snapshot at %d\n", kv.me, lastIndex)
 		//defer DTPrintf("%d: taking snapshot done at %d\n", kv.me, lastIndex)
 
 		w := new(bytes.Buffer)

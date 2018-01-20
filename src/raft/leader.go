@@ -116,6 +116,7 @@ LOOP:
 
 		// Retry. Failed reply makes other cases meaningless
 		if !ok {
+			time.Sleep(rf.retryInterval)
 			continue LOOP
 		}
 
@@ -155,7 +156,9 @@ LOOP:
 		}
 
 		if !ok {
-			DTPrintf("%d: send Snapshot failed\n", rf.me)
+			DTPrintf("%d: send Snapshot failed. Retry. role: %d, term: %d\n",
+				rf.me, rf.state.getRole(), rf.state.getCurrentTerm())
+			time.Sleep(rf.retryInterval)
 			continue LOOP
 		}
 
@@ -171,7 +174,7 @@ func (rf *Raft) getAppendArgs(first int, last int, term int,
 	jobDone := rf.Serialize("getAppendArgs")
 	defer close(jobDone)
 
-	DTPrintf("%d: try to get prev Term for %d\n", rf.me, first-1)
+	//DTPrintf("%d: try to get prev Term for %d\n", rf.me, first-1)
 	if rf.state.baseIndexTrimmed(first - 1) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. first %d\n", rf.me, first)
 		return nil
@@ -185,8 +188,8 @@ func (rf *Raft) getAppendArgs(first int, last int, term int,
 		LeaderCommit: rf.state.getCommitIndex()}
 
 	if !heartbeat {
-		DTPrintf("%d: try to get log range with first: %d, last: %d\n",
-			rf.me, first, last)
+		//DTPrintf("%d: try to get log range with first: %d, last: %d\n",
+		//rf.me, first, last)
 		newEntries, ok := rf.state.getLogRange(first, last+1)
 		if !ok {
 			DTPrintf("%d: [WARNING] snapshot was taken again. first %d\n", rf.me, first)
@@ -245,7 +248,7 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		j := last
 		// Notice here we don't use baseIndexTrimmed
 		found := false
-		for ; rf.state.indexTrimmed(j); j-- {
+		for ; !rf.state.indexTrimmed(j); j-- {
 			entryTerm := rf.state.getLogEntryTerm(j)
 			if entryTerm == reply.ConflictTerm {
 				found = true
