@@ -461,6 +461,7 @@ func TestCount2B(t *testing.T) {
 
 	total1 := rpcs()
 
+	DTESTPrintf("cost of rpcs for agreeing on one: %d", total1)
 	if total1 > 30 || total1 < 1 {
 		t.Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
 	}

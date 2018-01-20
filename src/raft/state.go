@@ -180,7 +180,7 @@ func (rs *RaftState) logEntryStream(done <-chan interface{}) <-chan indexEntry {
 
 		for i, l := range rs.Log[1:] {
 			select {
-			case stream <- indexEntry{index: i + rs.logBase, entry: l}:
+			case stream <- indexEntry{index: i + 1 + rs.logBase, entry: l}:
 			case <-done:
 				return
 			}

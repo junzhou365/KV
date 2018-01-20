@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"labrpc"
 	"math/rand"
 	"sync"
@@ -281,8 +282,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
-		DTPrintf("%d: doesn't have the prevIndex: %d. log base: %d\n",
-			rf.me, args.PrevLogIndex, rf.state.logBase)
+		DTPrintf("%d: doesn't have the prevIndex: %d. log base: %d, log len: %d\n",
+			rf.me, args.PrevLogIndex, rf.state.logBase, logLen)
 		return
 	}
 
@@ -310,7 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// find the first entry that has the conflicting term
 		streamDone := make(chan interface{})
 		for l := range rf.state.logEntryStream(streamDone) {
-			DTPrintf("%d: compare %v to term: %d\n", l, localPrevTerm)
+			DTPrintf("%d: compare %v to term: %d\n", rf.me, l, localPrevTerm)
 			index, entry := l.index, l.entry
 			if entry.Term == reply.ConflictTerm {
 				reply.ConflictIndex = index
@@ -319,7 +320,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if reply.ConflictIndex == 0 {
-			panic("Did not find the conflictIndex")
+			panic(fmt.Sprintf("%d: Did not find the conflictIndex for conflict term %d",
+				rf.me, localPrevTerm))
 		}
 
 		DTPrintf("%d: conflict local term %d with arg term %d. Found first conflict index: %d\n",
