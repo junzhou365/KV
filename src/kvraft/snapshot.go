@@ -49,3 +49,10 @@ func (kv *RaftKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 		kv.state.rw.Unlock()
 	}
 }
+
+func (kv *RaftKV) loadBaseLogEntry() {
+	kv.state.rw.RLock()
+	defer kv.state.rw.RUnlock()
+
+	kv.rf.LoadBaseLogEntry(kv.state.lastIncludedIndex, kv.state.lastIncludedTerm)
+}

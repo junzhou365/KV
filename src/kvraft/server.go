@@ -282,7 +282,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(RaftKV)
 	kv.me = me
-	kv.maxraftstate = 1
+	kv.maxraftstate = maxraftstate
 	kv.stateDelta = 20
 	kv.interval = 10 * time.Millisecond
 

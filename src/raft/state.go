@@ -91,15 +91,23 @@ func (rs *RaftState) indexTrimmed(index int) bool {
 	return rs.indexTrimmedWithNoLock(index)
 }
 
-func (rs *RaftState) getLogEntryWithNoLock(index int) (RaftLogEntry, bool) {
-	if rs.indexTrimmedWithNoLock(index) {
-		return RaftLogEntry{}, false
-	}
-
-	return rs.Log[index-rs.logBase], true
+func (rs *RaftState) baseIndexTrimmed(index int) bool {
+	rs.rw.RLock()
+	defer rs.rw.RUnlock()
+	return rs.indexTrimmedWithNoLock(index) && index != rs.logBase
 }
 
-func (rs *RaftState) getLogEntry(index int) (RaftLogEntry, bool) {
+func (rs *RaftState) getLogEntryWithNoLock(index int) RaftLogEntry {
+	if rs.indexTrimmedWithNoLock(index) {
+		//return RaftLogEntry{}, false
+		panic("entry doesn't exist")
+	}
+
+	DTPrintf("%d: index: %d, logBase: %d\n", rs.me, index, rs.logBase)
+	return rs.Log[index-rs.logBase]
+}
+
+func (rs *RaftState) getLogEntry(index int) RaftLogEntry {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
@@ -117,20 +125,29 @@ func (rs *RaftState) getBaseLogEntry() (int, int) {
 	return rs.getBaseLogEntryWithNoLock()
 }
 
-func (rs *RaftState) getLogEntryTermWithNoLock(index int) (int, bool) {
-	entry, ok := rs.getLogEntryWithNoLock(index)
-	if !ok && index != rs.logBase {
-		return 0, false
+func (rs *RaftState) loadBaseLogEntry(index int, term int) {
+	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
+	if len(rs.Log) != 1 {
+		panic("Not called during initialization")
 	}
 
-	if index == rs.logBase {
-		return rs.Log[0].Term, true
-	}
-
-	return entry.Term, true
+	rs.logBase = index
+	rs.Log[0].Term = term
 }
 
-func (rs *RaftState) getLogEntryTerm(index int) (int, bool) {
+func (rs *RaftState) getLogEntryTermWithNoLock(index int) int {
+	if index == rs.logBase {
+		return rs.Log[0].Term
+	}
+
+	entry := rs.getLogEntryWithNoLock(index)
+
+	return entry.Term
+}
+
+func (rs *RaftState) getLogEntryTerm(index int) int {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
 
@@ -219,32 +236,43 @@ func (rs *RaftState) getLogRange(start int, end int) ([]RaftLogEntry, bool) {
 	return rs.getLogRangeWithNoLock(start, end)
 }
 
-// Discard log entries up to the lastIndex
-func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) bool {
-	if lastIndex == -1 {
-		lastIndex = rs.getLogLenWithNoLock() - 1
-	}
-
+// Discard log entries up to the lastIndex. lastIndex must not be trimmed
+// lastIndex: -1, entire log
+func (rs *RaftState) discardLogEnriesWithNoLock(lastIndex int) {
 	if rs.indexTrimmedWithNoLock(lastIndex) {
-		return false
+		DTPrintf("%d: lastIndex: %d doesn't exist, logbase: %d\n",
+			rs.me, lastIndex, rs.logBase)
+		panic("lastIndex doesn't exist")
 	}
 
 	DTPrintf("%d: before discarding. lastIndex: %d, logBase: %d, log: %+v\n",
 		rs.me, lastIndex, rs.logBase, rs.Log)
 
-	rs.Log = rs.Log[lastIndex-rs.logBase:]
+	if lastIndex >= rs.getLogLenWithNoLock() {
+		rs.Log = rs.Log[rs.getLogLenWithNoLock()-1:]
+	} else {
+		rs.Log = rs.Log[lastIndex-rs.logBase:]
+	}
+
 	rs.Log[0].Command = nil
 	rs.logBase = lastIndex
+
+	if rs.commitIndex < rs.logBase {
+		rs.commitIndex = rs.logBase
+	}
+
+	if rs.lastApplied < rs.logBase {
+		rs.lastApplied = rs.logBase
+	}
 	DTPrintf("%d: logBase changed to %d in discard\n", rs.me, lastIndex)
-	return true
 }
 
 // Discard log entries up to the lastIndex
-func (rs *RaftState) discardLogEnries(lastIndex int) bool {
+func (rs *RaftState) discardLogEnries(lastIndex int) {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
-	return rs.discardLogEnriesWithNoLock(lastIndex)
+	rs.discardLogEnriesWithNoLock(lastIndex)
 }
 
 //func (rs *RaftState) loadSnapshotMetaData(index int, term int) {
@@ -367,8 +395,8 @@ func (rs *RaftState) updateCommitIndex(term int) int {
 			}
 		}
 		//DTPrintf("%d: the count is %d, n is %d", rf.me, count, n)
-		t, ok := rs.getLogEntryTermWithNoLock(n)
-		if count > rs.numPeers/2 && n > rs.commitIndex && ok && term == t {
+		t := rs.getLogEntryTermWithNoLock(n)
+		if count > rs.numPeers/2 && n > rs.commitIndex && term == t {
 			rs.commitIndex = n
 			return n
 		}
@@ -388,10 +416,7 @@ func (rs *RaftState) appliedEntries() []ApplyMsg {
 		DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
 			rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
 
-		entry, ok := rs.getLogEntryWithNoLock(rs.lastApplied)
-		if !ok {
-			panic("entry doesn't exist")
-		}
+		entry := rs.getLogEntryWithNoLock(rs.lastApplied)
 
 		entries = append(entries, ApplyMsg{
 			Index:   rs.lastApplied,
@@ -423,6 +448,7 @@ func (rs *RaftState) persist(persister *Persister) {
 	rs.rw.RLock()
 	e.Encode(rs.CurrentTerm)
 	e.Encode(rs.VotedFor)
+	e.Encode(rs.logBase)
 	e.Encode(rs.Log)
 	rs.rw.RUnlock()
 
@@ -455,6 +481,7 @@ func (rs *RaftState) readPersist(persister *Persister) {
 
 		d.Decode(&rs.CurrentTerm)
 		d.Decode(&rs.VotedFor)
+		d.Decode(&rs.logBase)
 		d.Decode(&rs.Log)
 	}
 }

@@ -126,6 +126,7 @@ LOOP:
 		// Snapshot instead.
 		oldNext = newNext
 		newNext = rf.sendSnapshot(done, i, term, newNext)
+		DTPrintf("%d: After sending snapshot, the newNext: %d\n", rf.me, newNext)
 
 		if newNext < 0 || (!heartbeat && newNext > newIndex) {
 			DTPrintf("%d: for %d, newNext: %d, oldNext: %d, newIndex: %d. returning!!\n",
@@ -135,11 +136,13 @@ LOOP:
 
 		args := rf.getAppendArgs(newNext, newIndex, term, heartbeat)
 		if args == nil {
+			DTPrintf("%d: FUCK THIS SHIT for newNext: %d, newIndex: %d\n",
+				rf.me, newNext, newIndex)
 			continue
 		}
 
 		reply := new(AppendEntriesReply)
-		DTPrintf("%d: sends Append to %d with next: %d, newIndex: %d\n", rf.me, i, next, newIndex)
+		DTPrintf("%d: sends Append to %d with next: %d, newIndex: %d\n", rf.me, i, newNext, newIndex)
 
 		ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 
@@ -231,11 +234,11 @@ func (rf *Raft) getAppendArgs(newNext int, newIndex int, term int,
 	defer close(jobDone)
 
 	DTPrintf("%d: try to get prev Term for %d\n", rf.me, newNext-1)
-	prevTerm, ok := rf.state.getLogEntryTerm(newNext - 1)
-	if !ok {
+	if rf.state.baseIndexTrimmed(newNext - 1) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. newNext %d\n", rf.me, newNext)
 		return nil
 	}
+	prevTerm := rf.state.getLogEntryTerm(newNext - 1)
 
 	args = &AppendEntriesArgs{
 		Term:         term,
@@ -306,16 +309,16 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		// Find the last entry of the conflicting term. The conflicting
 		// server will delete all entries after this new newNext
 		j := nnewIndex
-		// j > 0 is safe here because two logs are the same at lastIncludedEntryIndex
-		for ; j > 0; j-- {
-			entryTerm, ok := rf.state.getLogEntryTerm(j)
-			if !ok || ok && entryTerm == reply.ConflictTerm {
+		// Notice here we don't use baseIndexTrimmed
+		for ; rf.state.indexTrimmed(j); j-- {
+			entryTerm := rf.state.getLogEntryTerm(j)
+			if entryTerm == reply.ConflictTerm {
 				break
 			}
 		}
 
 		nnewNext = j + 1
-		//DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
+		DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, newNext)
 
 	case reply.Success && heartbeat:
 		nnewIndex = rf.state.getLogLen() - 1

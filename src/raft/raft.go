@@ -76,23 +76,22 @@ const (
 	LEADER
 )
 
-func (rf *Raft) GetLastIndexAndTerm() (int, int) {
-	return rf.state.getBaseLogEntry()
-}
-
 func (rf *Raft) DiscardLogEnries(index int) {
 	jobDone := rf.Serialize("DiscardLogEnries")
 	defer close(jobDone)
 
+	// Has been trimmed?
+	if rf.state.indexTrimmed(index) {
+		return
+	}
 	rf.state.discardLogEnries(index)
 }
 
-func (rf *Raft) GetLogLen() int {
-	return rf.state.getLogLen()
-}
+func (rf *Raft) LoadBaseLogEntry(index int, term int) {
+	jobDone := rf.Serialize("DiscardLogEnries")
+	defer close(jobDone)
 
-func (rf *Raft) GetLogEntryTerm(index int) (int, bool) {
-	return rf.state.getLogEntryTerm(index)
+	rf.state.loadBaseLogEntry(index, term)
 }
 
 // return CurrentTerm and whether this server
@@ -168,7 +167,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Is it most up-to-date?
 	logLen := rf.state.getLogLen()
 	lastLogIndex := logLen - 1
-	lastTerm, _ := rf.state.getLogEntryTerm(lastLogIndex)
+	lastTerm := rf.state.getLogEntryTerm(lastLogIndex)
 
 	DTPrintf("%d received RequestVote RPC req %+v | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
 		rf.me, args, curVotedFor, lastLogIndex, logLen)
@@ -276,14 +275,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		reply.ConflictIndex = logLen
 		reply.ConflictTerm = -1
+		DTPrintf("%d: log base: %d\n", rf.me, rf.state.logBase)
 		return
 	}
 
 	localPrevIndex := args.PrevLogIndex
-	localPrevTerm, ok := rf.state.getLogEntryTerm(localPrevIndex)
-	if !ok {
+	var localPrevTerm int
+	if rf.state.indexTrimmed(localPrevIndex) {
 		DTPrintf("%d: delayed Append RPC\n", rf.me)
 		localPrevIndex, localPrevTerm = rf.state.getBaseLogEntry()
+	} else {
+		localPrevTerm = rf.state.getLogEntryTerm(localPrevIndex)
 	}
 
 	if localPrevIndex > args.PrevLogIndex+len(args.Entries) {
@@ -320,12 +322,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				break
 			}
 
-			switch deleteTerm, ok := rf.state.getLogEntryTerm(deleteIndex); {
-
-			case !ok:
-				panic("deleteIndex was deleted")
-
-			case deleteTerm != entry.Term:
+			if deleteTerm := rf.state.getLogEntryTerm(deleteIndex); deleteTerm != entry.Term {
 				// delete conflicted entries
 				rf.state.truncateLog(deleteIndex)
 				rf.state.appendLogEntries(entries[deleteIndex-localPrevIndex-1:])
@@ -406,22 +403,26 @@ func (rf *Raft) InstallSnapshot(
 	//DTPrintf("%d: own states before snapshot change. lastIncludedEntryIndex: %d, logLen: %d\n", rf.me,
 	//rf.state.lastIncludedEntryIndex, rf.state.getLogLenWithNoLock())
 
+	// XXX: save need to confirm
 	rf.applyCh <- ApplyMsg{UseSnapshot: false, Snapshot: args.Data}
+
+	lastBeyondLog := args.LastIncludedEntryIndex >= rf.state.getLogLen()-1
+	if lastBeyondLog {
+		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
+		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
+		return
+	}
+
+	lastIndex := rf.state.getLogEntryTerm(args.LastIncludedEntryIndex)
 
 	// If lastIncludedEntry exists in log and we have applied it, then we could
 	// just delete up to that entry.
-	// XXX: refactor
-	lastBeyondLog := args.LastIncludedEntryIndex >= rf.state.getLogLen()-1
-	lastIndex, ok := rf.state.getLogEntryTerm(args.LastIncludedEntryIndex)
-	if !ok {
-		panic("snapshot was taken again")
-	}
-
-	if !lastBeyondLog && args.LastIncludedEntryTerm == lastIndex &&
+	if args.LastIncludedEntryTerm == lastIndex &&
 		rf.state.getLastApplied() >= args.LastIncludedEntryIndex {
 
 		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
 	} else {
+		rf.state.discardLogEnries(args.LastIncludedEntryIndex)
 		rf.applyCh <- ApplyMsg{UseSnapshot: true, Snapshot: args.Data}
 	}
 
