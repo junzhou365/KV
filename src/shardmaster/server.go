@@ -213,6 +213,11 @@ func (sm *ShardMaster) changeState(op Op) Op {
 			newConfig.Groups[gid] = servers
 		}
 		newConfig.Shards = distributeShards(newConfig.Groups)
+
+	case "Move":
+		// shallow the original newConfig
+		newConfig = sm.getLastConfigCopyWOLOCK()
+		newConfig.Shards[op.Shard] = op.GIDs[0]
 	}
 
 	sm.configs = append(sm.configs, newConfig)
@@ -292,6 +297,22 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	op := Op{
+		Type:     "Move",
+		Seq:      args.State.Seq,
+		ClientId: args.State.Id,
+		Shard:    args.Shard,
+		GIDs:     []int{args.GID}}
+
+	ret := sm.commitOperation(op)
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		panic(fmt.Sprintf("Wrong ret type %v", ret))
+	}
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {

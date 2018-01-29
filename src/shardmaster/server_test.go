@@ -75,3 +75,15 @@ func TestUnitChangeStateLeave(t *testing.T) {
 		t.Error("Not the config that was given")
 	}
 }
+
+func TestUnitChangeStateMove(t *testing.T) {
+	sm := setup()
+	config := oneConfig()
+	sm.configs = append(sm.configs, config)
+	op := Op{Type: "Move", GIDs: []int{2}, Shard: 6}
+	sm.changeState(op)
+	copy := sm.getLastConfigCopyWOLOCK()
+	if v := copy.Shards[6]; v != 2 {
+		t.Error("Not the config that was given")
+	}
+}
