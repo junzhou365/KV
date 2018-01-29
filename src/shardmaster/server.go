@@ -46,10 +46,14 @@ func (sm *ShardMaster) setDup(id int, op Op) {
 
 type Op struct {
 	// Your data here.
-	Config   Config
 	Type     string
 	Seq      uint // for de-duplicate reqs
 	ClientId int
+
+	Servers map[int][]string
+	GIDs    []int
+	Shard   int
+	Num     int
 }
 
 type Request struct {
@@ -157,10 +161,26 @@ func (sm *ShardMaster) changeState(op Op) Op {
 	}
 
 	sm.mu.Lock()
+	newConfig := Config{}
 	switch op.Type {
 	case "Join":
-		sm.configs = append(sm.configs, op.Config)
+		// deep copy of map
+		for gid, server := range op.Servers {
+			newConfig.Groups[gid] = server
+		}
+
+		for i := 0; i < NShards; i++ {
+			for gid, _ := range newConfig.Groups {
+				// Simply distribute gids using mod. May not be evenly
+				// distributed.
+				newConfig.Shards[gid%NShards] = gid
+			}
+		}
+
 	}
+
+	sm.configs = append(sm.configs, newConfig)
+	DTPrintf("%d: The new config is %v\n", sm.me, newConfig)
 	sm.mu.Unlock()
 
 	sm.setDup(op.ClientId, op)
@@ -198,27 +218,11 @@ func (sm *ShardMaster) commitOperation(op Op) interface{} {
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	groups := make(map[int][]string)
-	for gid, server := range args.Servers {
-		groups[gid] = server
-	}
-
-	shards := [NShards]int{}
-	for i := 0; i < NShards; i++ {
-		for gid, _ := range groups {
-			// Simply distribute gids using mod. May not be evenly distributed.
-			shards[gid%NShards] = gid
-		}
-	}
-
-	DTPrintf("%d: The shards are %v\n", sm.me, shards)
-
 	op := Op{
-		Type: "Join",
-		Config: Config{
-			Num:    sm.getConfigNum(),
-			Shards: shards,
-			Groups: groups}}
+		Type:     "Join",
+		Seq:      args.State.Seq,
+		ClientId: args.State.Id,
+		Servers:  args.Servers}
 
 	ret := sm.commitOperation(op)
 	switch ret.(type) {
