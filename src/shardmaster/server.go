@@ -23,14 +23,6 @@ type ShardMaster struct {
 	configs    []Config // indexed by config num
 }
 
-// Used for getting a config num
-func (sm *ShardMaster) getConfigNum() int {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	return len(sm.configs)
-}
-
 func (sm *ShardMaster) getDup(id int) (Op, bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -42,6 +34,25 @@ func (sm *ShardMaster) setDup(id int, op Op) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.duplicates[id] = op
+}
+
+// get a copy of last config
+func (sm *ShardMaster) getLastConfigCopyWOLOCK() Config {
+	if len(sm.configs) == 1 {
+		panic("No valid config available")
+	}
+
+	lastConfig := sm.configs[len(sm.configs)-1]
+	copy := Config{Num: lastConfig.Num}
+	for i := 0; i < NShards; i++ {
+		copy.Shards[i] = lastConfig.Shards[i]
+	}
+	copy.Groups = make(map[int][]string)
+	for k, v := range lastConfig.Groups {
+		copy.Groups[k] = v
+	}
+
+	return copy
 }
 
 type Op struct {
@@ -153,30 +164,55 @@ func (sm *ShardMaster) run() {
 		}
 	}
 }
+func distributeShards(groups map[int][]string) [NShards]int {
+	gids := []int{}
+	for k, _ := range groups {
+		gids = append(gids, k)
+	}
+	shards := [NShards]int{}
+	for i := 0; i < NShards; i++ {
+		// Simply distribute gids using mod. May not be evenly
+		// distributed.
+		shards[i] = gids[i%len(gids)]
+	}
+
+	return shards
+}
 
 func (sm *ShardMaster) changeState(op Op) Op {
+
 	// Duplicate Op
 	if resOp, ok := sm.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
 		return resOp
 	}
 
 	sm.mu.Lock()
-	newConfig := Config{}
+	newConfig := Config{
+		Num:    len(sm.configs),
+		Groups: make(map[int][]string)}
+
 	switch op.Type {
 	case "Join":
 		// deep copy of map
-		for gid, server := range op.Servers {
-			newConfig.Groups[gid] = server
+		for gid, servers := range op.Servers {
+			newConfig.Groups[gid] = servers
 		}
 
-		for i := 0; i < NShards; i++ {
-			for gid, _ := range newConfig.Groups {
-				// Simply distribute gids using mod. May not be evenly
-				// distributed.
-				newConfig.Shards[gid%NShards] = gid
+		newConfig.Shards = distributeShards(newConfig.Groups)
+
+	case "Leave":
+		// update groups
+		oldConfig := sm.getLastConfigCopyWOLOCK()
+	Remove_LOOP:
+		for gid, servers := range oldConfig.Groups {
+			for _, toRemoveGid := range op.GIDs {
+				if gid == toRemoveGid {
+					continue Remove_LOOP
+				}
 			}
+			newConfig.Groups[gid] = servers
 		}
-
+		newConfig.Shards = distributeShards(newConfig.Groups)
 	}
 
 	sm.configs = append(sm.configs, newConfig)
@@ -237,6 +273,21 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
+	op := Op{
+		Type:     "Leave",
+		Seq:      args.State.Seq,
+		ClientId: args.State.Id,
+		GIDs:     args.GIDs}
+
+	ret := sm.commitOperation(op)
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		panic(fmt.Sprintf("Wrong ret type %v", ret))
+	}
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
