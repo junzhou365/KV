@@ -13,13 +13,13 @@ func setup() *ShardMaster {
 	return sm
 }
 
-func oneConfig() Config {
+func oneConfig(num int) Config {
 	groups := make(map[int][]string)
 	groups[12] = []string{"hello", "world"}
 	groups[14] = []string{"see", "you"}
 
 	config := Config{
-		Num:    12,
+		Num:    num,
 		Shards: [NShards]int{1, 2, 3, 4, 5, 6, 7, 8, 1},
 		Groups: groups}
 	return config
@@ -27,7 +27,7 @@ func oneConfig() Config {
 
 func TestUnitGetLastConfigCopy(t *testing.T) {
 	sm := setup()
-	config := oneConfig()
+	config := oneConfig(1)
 	sm.configs = append(sm.configs, config)
 
 	copy := sm.getLastConfigCopyWOLOCK()
@@ -65,7 +65,7 @@ func TestUnitChangeStateJoin(t *testing.T) {
 
 func TestUnitChangeStateLeave(t *testing.T) {
 	sm := setup()
-	config := oneConfig()
+	config := oneConfig(1)
 	sm.configs = append(sm.configs, config)
 	op := Op{Type: "Leave", GIDs: []int{12}}
 	sm.changeState(op)
@@ -78,7 +78,7 @@ func TestUnitChangeStateLeave(t *testing.T) {
 
 func TestUnitChangeStateMove(t *testing.T) {
 	sm := setup()
-	config := oneConfig()
+	config := oneConfig(1)
 	sm.configs = append(sm.configs, config)
 	op := Op{Type: "Move", GIDs: []int{2}, Shard: 6}
 	sm.changeState(op)
@@ -86,4 +86,17 @@ func TestUnitChangeStateMove(t *testing.T) {
 	if v := copy.Shards[6]; v != 2 {
 		t.Error("Not the config that was given")
 	}
+}
+
+func TestUnitChangeStateQuery(t *testing.T) {
+	sm := setup()
+	sm.configs = append(sm.configs, oneConfig(1))
+	sm.configs = append(sm.configs, oneConfig(2))
+
+	op := Op{Type: "Query"}
+	ret := sm.changeState(op)
+	if ret.Config.Num != 2 {
+		t.Error("Not the config that was given")
+	}
+
 }

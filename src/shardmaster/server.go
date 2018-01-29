@@ -14,7 +14,6 @@ type ShardMaster struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-	configNum    int
 	reqs         chan *Request
 	liveRequests map[int]*Request
 	interval     time.Duration
@@ -64,7 +63,7 @@ type Op struct {
 	Servers map[int][]string
 	GIDs    []int
 	Shard   int
-	Num     int
+	Config  Config
 }
 
 type Request struct {
@@ -187,20 +186,24 @@ func (sm *ShardMaster) changeState(op Op) Op {
 	}
 
 	sm.mu.Lock()
-	newConfig := Config{
-		Num:    len(sm.configs),
-		Groups: make(map[int][]string)}
 
 	switch op.Type {
 	case "Join":
+		newConfig := Config{
+			Num:    len(sm.configs),
+			Groups: make(map[int][]string)}
 		// deep copy of map
 		for gid, servers := range op.Servers {
 			newConfig.Groups[gid] = servers
 		}
 
 		newConfig.Shards = distributeShards(newConfig.Groups)
+		sm.configs = append(sm.configs, newConfig)
 
 	case "Leave":
+		newConfig := Config{
+			Num:    len(sm.configs),
+			Groups: make(map[int][]string)}
 		// update groups
 		oldConfig := sm.getLastConfigCopyWOLOCK()
 	Remove_LOOP:
@@ -213,15 +216,18 @@ func (sm *ShardMaster) changeState(op Op) Op {
 			newConfig.Groups[gid] = servers
 		}
 		newConfig.Shards = distributeShards(newConfig.Groups)
+		sm.configs = append(sm.configs, newConfig)
 
 	case "Move":
-		// shallow the original newConfig
-		newConfig = sm.getLastConfigCopyWOLOCK()
+		newConfig := sm.getLastConfigCopyWOLOCK()
+		newConfig.Num = len(sm.configs)
 		newConfig.Shards[op.Shard] = op.GIDs[0]
+		sm.configs = append(sm.configs, newConfig)
+
+	case "Query":
+		op.Config = sm.getLastConfigCopyWOLOCK()
 	}
 
-	sm.configs = append(sm.configs, newConfig)
-	DTPrintf("%d: The new config is %v\n", sm.me, newConfig)
 	sm.mu.Unlock()
 
 	sm.setDup(op.ClientId, op)
@@ -317,6 +323,33 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	sm.mu.Lock()
+	switch {
+	case args.Num == 0:
+	case args.Num > 0 && args.Num < len(sm.configs):
+		reply.Config = sm.configs[args.Num]
+		sm.mu.Unlock()
+		return
+	default:
+	}
+	sm.mu.Unlock()
+
+	op := Op{
+		Type:     "Query",
+		Seq:      args.State.Seq,
+		ClientId: args.State.Id}
+
+	ret := sm.commitOperation(op)
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	case Config:
+		reply.Config = ret.(Config)
+	default:
+		panic(fmt.Sprintf("Wrong ret type %v", ret))
+	}
 }
 
 //
