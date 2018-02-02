@@ -60,6 +60,7 @@ type Raft struct {
 	newEntry          chan int
 	//sendChs           []chan sendJob
 	appendReplyCh chan bool
+	shutDown      chan interface{}
 }
 
 type rpcResp struct {
@@ -522,6 +523,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	close(rf.shutDown)
 }
 
 // Long time main running goroutine
@@ -534,6 +536,12 @@ func (rf *Raft) run() {
 			rf.runCandidate()
 		case LEADER:
 			rf.runLeader()
+		}
+
+		select {
+		case <-rf.shutDown:
+			return
+		default:
 		}
 	}
 }
@@ -579,6 +587,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.commit = make(chan int)
 	rf.applyCh = applyCh
+	rf.shutDown = make(chan interface{})
 
 	go rf.state.stateLoop()
 	go rf.run()

@@ -60,6 +60,9 @@ LOOP:
 		case <-electionTimeoutTimer:
 			// restart election
 			return
+
+		case <-rf.shutDown:
+			return
 		}
 	}
 

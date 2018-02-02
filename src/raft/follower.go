@@ -18,6 +18,9 @@ LOOP:
 		case <-time.After(getElectionTimeout()):
 			startElection = true
 			break LOOP
+
+		case <-rf.shutDown:
+			return
 		}
 	}
 	if startElection {

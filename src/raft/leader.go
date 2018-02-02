@@ -42,6 +42,9 @@ func (rf *Raft) runLeader() {
 		case <-rf.appendReplyCh:
 			DTPrintf("%d: exit leader loop\n", rf.me)
 			return
+
+		case <-rf.shutDown:
+			return
 		}
 	}
 }
