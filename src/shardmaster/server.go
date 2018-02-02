@@ -37,10 +37,6 @@ func (sm *ShardMaster) setDup(id int, op Op) {
 
 // get a copy of last config
 func (sm *ShardMaster) getLastConfigCopyWOLOCK() Config {
-	if len(sm.configs) == 1 {
-		panic("No valid config available")
-	}
-
 	lastConfig := sm.configs[len(sm.configs)-1]
 	copy := Config{Num: lastConfig.Num}
 	for i := 0; i < NShards; i++ {
@@ -163,22 +159,104 @@ func (sm *ShardMaster) run() {
 		}
 	}
 }
-func distributeShards(groups map[int][]string) [NShards]int {
+
+func distributeShards(config Config) [NShards]int {
+	prevShards := config.Shards
+	groups := config.Groups
+	// create tickets for each gid
+	// e.g. ngroups: 3
+	// avg = 10 / 3 = 3.
+	// first 10 % ngroups = 1 share the extra ticket
+	ngroups := len(groups)
+	avgTickes := NShards / ngroups
+	extraTickets := NShards % ngroups
+
+	usage := map[int]int{}
+	updateUse := func(i int, gid int) bool {
+		// new gid that hasn't been used
+		use, ok := usage[gid]
+		if !ok {
+			usage[gid] = 1
+			return true
+		}
+
+		if use < avgTickes || (use == avgTickes && extraTickets > 0) {
+			if use == avgTickes {
+				extraTickets--
+			}
+			usage[gid]++
+			return true
+		}
+
+		return false
+	}
+
 	gids := []int{}
-	for k, _ := range groups {
-		gids = append(gids, k)
+	for gid, _ := range config.Groups {
+		gids = append(gids, gid)
 	}
+	nextGIDIndex := 0
+	getNextGID := func() int {
+		for nextGIDIndex < len(gids) {
+			gid := gids[nextGIDIndex]
+			use, ok := usage[gid]
+			if !ok || use < avgTickes || (use == avgTickes && extraTickets > 0) {
+				//fmt.Printf("new gid: %v\n", gids[nextGIDIndex])
+				return gids[nextGIDIndex]
+			}
+			nextGIDIndex++
+			//fmt.Printf("usage: %v\n", usage)
+		}
+
+		panic("not reached")
+	}
+
+	//fmt.Printf("prev shards: %v\n", prevShards)
 	shards := [NShards]int{}
+	// first pass. Update all remaining gids' usage
 	for i := 0; i < NShards; i++ {
-		// Simply distribute gids using mod. May not be evenly
-		// distributed.
-		shards[i] = gids[i%len(gids)]
+		gid := prevShards[i]
+		if _, ok := config.Groups[gid]; ok {
+			if updateUse(i, gid) {
+				shards[i] = gid
+			}
+		}
 	}
+
+	//fmt.Printf("usage after first: %v\n", usage)
+	//fmt.Printf("shards after first: %v\n", shards)
+	//fmt.Printf("gids after first: %v\n", gids)
+	//fmt.Printf("avg: %v, extra: %v\n", avgTickes, extraTickets)
+
+	// second pass. Update all gids
+	for i := 0; i < NShards; i++ {
+		gid := shards[i]
+		if gid != 0 {
+			continue
+		}
+
+		if _, ok := config.Groups[gid]; !ok {
+			gid = getNextGID()
+		}
+
+		for {
+			if updateUse(i, gid) {
+				shards[i] = gid
+				break
+			} else {
+				gid = getNextGID()
+			}
+		}
+		//fmt.Printf("shards in second: %v\n", shards)
+	}
+
+	//fmt.Printf("shards after second: %v\n", shards)
 
 	return shards
 }
 
 func (sm *ShardMaster) changeState(op Op) Op {
+	defer DTPrintf("%d: op %+v is applied to state\n", sm.me, op)
 
 	// Duplicate Op
 	if resOp, ok := sm.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
@@ -189,33 +267,30 @@ func (sm *ShardMaster) changeState(op Op) Op {
 
 	switch op.Type {
 	case "Join":
-		newConfig := Config{
-			Num:    len(sm.configs),
-			Groups: make(map[int][]string)}
-		// deep copy of map
+		newConfig := sm.getLastConfigCopyWOLOCK()
+		newConfig.Num = len(sm.configs)
 		for gid, servers := range op.Servers {
-			newConfig.Groups[gid] = servers
-		}
-
-		newConfig.Shards = distributeShards(newConfig.Groups)
-		sm.configs = append(sm.configs, newConfig)
-
-	case "Leave":
-		newConfig := Config{
-			Num:    len(sm.configs),
-			Groups: make(map[int][]string)}
-		// update groups
-		oldConfig := sm.getLastConfigCopyWOLOCK()
-	Remove_LOOP:
-		for gid, servers := range oldConfig.Groups {
-			for _, toRemoveGid := range op.GIDs {
-				if gid == toRemoveGid {
-					continue Remove_LOOP
-				}
+			if _, ok := newConfig.Groups[gid]; ok {
+				//panic(fmt.Sprintf("%d: gid %v must be new", sm.me, gid))
 			}
 			newConfig.Groups[gid] = servers
 		}
-		newConfig.Shards = distributeShards(newConfig.Groups)
+
+		newConfig.Shards = distributeShards(newConfig)
+		sm.configs = append(sm.configs, newConfig)
+		DTPrintf("%d: after join, configs: %v\n", sm.me, sm.configs)
+
+	case "Leave":
+		newConfig := sm.getLastConfigCopyWOLOCK()
+		newConfig.Num = len(sm.configs)
+		// update groups
+		for _, gid := range op.GIDs {
+			if _, ok := newConfig.Groups[gid]; ok {
+				delete(newConfig.Groups, gid)
+			}
+		}
+
+		newConfig.Shards = distributeShards(newConfig)
 		sm.configs = append(sm.configs, newConfig)
 
 	case "Move":
@@ -226,6 +301,7 @@ func (sm *ShardMaster) changeState(op Op) Op {
 
 	case "Query":
 		op.Config = sm.getLastConfigCopyWOLOCK()
+		DTPrintf("%d: after query, config: %v\n", sm.me, op.Config)
 	}
 
 	sm.mu.Unlock()
@@ -256,7 +332,7 @@ func (sm *ShardMaster) commitOperation(op Op) interface{} {
 	sm.putRequest(index, req)
 	config := <-req.resCh
 
-	//DTPrintf("%d: config from commitOperation is %+v\n", sm.me, config)
+	DTPrintf("%d: config from commitOperation is %+v\n", sm.me, config)
 	if config == nil {
 		return Err("Leader role lost")
 	}
@@ -277,8 +353,6 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 		reply.WrongLeader = true
 	case Err:
 		reply.Err = ret.(Err)
-	default:
-		panic(fmt.Sprintf("Wrong ret type %v", ret))
 	}
 }
 
@@ -296,13 +370,12 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		reply.WrongLeader = true
 	case Err:
 		reply.Err = ret.(Err)
-	default:
-		panic(fmt.Sprintf("Wrong ret type %v", ret))
 	}
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	DTPrintf("%d: Server [Move], args: %+v\n", sm.me, args)
 	op := Op{
 		Type:     "Move",
 		Seq:      args.State.Seq,
@@ -316,21 +389,18 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 		reply.WrongLeader = true
 	case Err:
 		reply.Err = ret.(Err)
-	default:
-		panic(fmt.Sprintf("Wrong ret type %v", ret))
 	}
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+	DTPrintf("%d: Server [Query], args: %+v\n", sm.me, args)
 	sm.mu.Lock()
-	switch {
-	case args.Num == 0:
-	case args.Num > 0 && args.Num < len(sm.configs):
+	DTPrintf("configs: %v\n", sm.configs)
+	if args.Num >= 0 && args.Num < len(sm.configs) {
 		reply.Config = sm.configs[args.Num]
 		sm.mu.Unlock()
 		return
-	default:
 	}
 	sm.mu.Unlock()
 
@@ -345,8 +415,9 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		reply.WrongLeader = true
 	case Err:
 		reply.Err = ret.(Err)
-	case Config:
-		reply.Config = ret.(Config)
+	case Op:
+		reply.Config = ret.(Op).Config
+		DTPrintf("%d: Query result: %v\n", sm.me, reply.Config)
 	default:
 		panic(fmt.Sprintf("Wrong ret type %v", ret))
 	}
@@ -381,11 +452,16 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
 
+	sm.duplicates = make(map[int]Op)
+	sm.liveRequests = make(map[int]*Request)
+
 	gob.Register(Op{})
 	sm.applyCh = make(chan raft.ApplyMsg)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	// Your code here.
+	go sm.run()
+	DTPrintf("shardmaster %d is created\n", sm.me)
 
 	return sm
 }

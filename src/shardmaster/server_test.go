@@ -27,6 +27,12 @@ func oneConfig(num int) Config {
 
 func TestUnitGetLastConfigCopy(t *testing.T) {
 	sm := setup()
+	emptyConfig := Config{
+		Groups: map[int][]string{}}
+	if !cmp.Equal(sm.getLastConfigCopyWOLOCK(), emptyConfig) {
+		t.Error("Not the config that was given")
+	}
+
 	config := oneConfig(1)
 	sm.configs = append(sm.configs, config)
 
@@ -42,12 +48,75 @@ func TestUnitGetLastConfigCopy(t *testing.T) {
 }
 
 func TestUnitDistributeShards(t *testing.T) {
+	var ret [NShards]int
+
 	groups := make(map[int][]string)
 	groups[12] = []string{"hello", "world"}
 	groups[14] = []string{"see", "you"}
 	groups[22] = []string{"hello", "world"}
 
-	distributeShards(groups)
+	config := Config{
+		Num:    0,
+		Shards: [NShards]int{},
+		Groups: groups}
+	ret = distributeShards(config)
+
+	// exact same groups
+	groups = make(map[int][]string)
+	groups[12] = []string{"hello", "world"}
+	groups[14] = []string{"see", "you"}
+	groups[22] = []string{"hello", "world"}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
+
+	config.Shards = ret
+	if !cmp.Equal(ret, distributeShards(config)) {
+		t.Error("Wrong shards")
+	}
+
+	groups = make(map[int][]string)
+	for i := 1; i < 10+1; i++ {
+		groups[i] = []string{}
+	}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
+
+	config.Shards = ret
+	groups = make(map[int][]string)
+	for i := 1; i < 15+1; i++ {
+		groups[i] = []string{}
+	}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
+
+	// remove some gids
+	config.Shards = ret
+	groups = make(map[int][]string)
+	for i := 1; i < 10+1; i++ {
+		groups[i] = []string{}
+	}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
+
+	// remove gid:14, 15
+	groups = make(map[int][]string)
+	groups[12] = []string{"hello", "world"}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
+
+	// add 22 back
+	groups = make(map[int][]string)
+	groups[12] = []string{"hello", "world"}
+	groups[14] = []string{"see", "you"}
+	groups[22] = []string{"hello", "world"}
+	config.Groups = groups
+	ret = distributeShards(config)
+	DTPrintf("new shards are %v\n", ret)
 }
 
 func TestUnitChangeStateJoin(t *testing.T) {
@@ -56,9 +125,26 @@ func TestUnitChangeStateJoin(t *testing.T) {
 	groups[12] = []string{"hello", "world"}
 	groups[14] = []string{"see", "you"}
 
-	op := Op{Type: "Join", Servers: groups}
+	op := Op{Seq: 0, Type: "Join", Servers: groups}
 	sm.changeState(op)
 	if copy := sm.getLastConfigCopyWOLOCK(); !cmp.Equal(copy.Groups, groups) {
+		DTPrintf("groups: %v, shards: %v", copy.Groups, copy.Shards)
+		t.Error("Not the config that was given")
+	}
+
+	groups = make(map[int][]string)
+	groups[22] = []string{"a", "b"}
+	groups[24] = []string{"c", "d"}
+	op = Op{Seq: 1, Type: "Join", Servers: groups}
+	sm.changeState(op)
+
+	expectedGroups := make(map[int][]string)
+	expectedGroups[12] = []string{"hello", "world"}
+	expectedGroups[14] = []string{"see", "you"}
+	expectedGroups[22] = []string{"a", "b"}
+	expectedGroups[24] = []string{"c", "d"}
+	if copy := sm.getLastConfigCopyWOLOCK(); !cmp.Equal(copy.Groups, expectedGroups) {
+		DTPrintf("groups: %v, shards: %v", copy.Groups, copy.Shards)
 		t.Error("Not the config that was given")
 	}
 }
