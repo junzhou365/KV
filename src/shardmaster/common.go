@@ -37,8 +37,14 @@ const (
 
 type Err string
 
+type ReqState struct {
+	Seq uint
+	Id  int
+}
+
 type JoinArgs struct {
 	Servers map[int][]string // new GID -> servers mappings
+	State   ReqState
 }
 
 type JoinReply struct {
@@ -47,7 +53,8 @@ type JoinReply struct {
 }
 
 type LeaveArgs struct {
-	GIDs []int
+	GIDs  []int
+	State ReqState
 }
 
 type LeaveReply struct {
@@ -58,6 +65,7 @@ type LeaveReply struct {
 type MoveArgs struct {
 	Shard int
 	GID   int
+	State ReqState
 }
 
 type MoveReply struct {
@@ -66,7 +74,8 @@ type MoveReply struct {
 }
 
 type QueryArgs struct {
-	Num int // desired config number
+	Num   int // desired config number
+	State ReqState
 }
 
 type QueryReply struct {

@@ -60,6 +60,10 @@ type Op struct {
 	GIDs    []int
 	Shard   int
 	Config  Config
+	// this is needed because if server just restarts and receives a request
+	// with n = 1, then the server will return the lastest config, not the
+	// config with n = 1 because replaying of previous configs.
+	Num int
 }
 
 type Request struct {
@@ -300,7 +304,13 @@ func (sm *ShardMaster) changeState(op Op) Op {
 		sm.configs = append(sm.configs, newConfig)
 
 	case "Query":
-		op.Config = sm.getLastConfigCopyWOLOCK()
+		DTPrintf("%d: before query, op: %v\n", sm.me, op)
+		if op.Num == -1 || op.Num >= len(sm.configs) {
+			op.Config = sm.getLastConfigCopyWOLOCK()
+		} else {
+			op.Config = sm.configs[op.Num]
+		}
+		DTPrintf("%d: after query, configs: %v\n", sm.me, sm.configs)
 		DTPrintf("%d: after query, config: %v\n", sm.me, op.Config)
 	}
 
@@ -397,8 +407,12 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	DTPrintf("%d: Server [Query], args: %+v\n", sm.me, args)
 	sm.mu.Lock()
 	DTPrintf("configs: %v\n", sm.configs)
-	if args.Num >= 0 && args.Num < len(sm.configs) {
+	switch {
+	case args.Num >= 0 && args.Num < len(sm.configs):
 		reply.Config = sm.configs[args.Num]
+		sm.mu.Unlock()
+		return
+	case args.Num < -1:
 		sm.mu.Unlock()
 		return
 	}
@@ -407,7 +421,8 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	op := Op{
 		Type:     "Query",
 		Seq:      args.State.Seq,
-		ClientId: args.State.Id}
+		ClientId: args.State.Id,
+		Num:      args.Num}
 
 	ret := sm.commitOperation(op)
 	switch ret.(type) {

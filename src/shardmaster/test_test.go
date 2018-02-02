@@ -54,6 +54,7 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 
 func check_same_config(t *testing.T, c1 Config, c2 Config) {
 	if c1.Num != c2.Num {
+		DTESTPrintf("c1: %v, c2: %v\n", c1, c2)
 		t.Fatalf("Num wrong")
 	}
 	if c1.Shards != c2.Shards {
@@ -129,8 +130,10 @@ func TestBasic(t *testing.T) {
 
 	for s := 0; s < nservers; s++ {
 		cfg.ShutdownServer(s)
+		DTESTPrintf("shut down %d\n", s)
 		for i := 0; i < len(cfa); i++ {
 			c := ck.Query(cfa[i].Num)
+			DTESTPrintf("config: %v\n", c)
 			check_same_config(t, c, cfa[i])
 		}
 		cfg.StartServer(s)
@@ -235,6 +238,7 @@ func TestBasic(t *testing.T) {
 		ck.Leave([]int{int(npara + 1 + i)})
 	}
 	c3 := ck.Query(-1)
+	DTESTPrintf("c2: %v, c3: %v\n", c2.Shards, c3.Shards)
 	for i := int(1); i <= npara; i++ {
 		for j := 0; j < len(c1.Shards); j++ {
 			if c2.Shards[j] == i {

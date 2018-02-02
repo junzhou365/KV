@@ -179,9 +179,15 @@ func TestUnitChangeStateQuery(t *testing.T) {
 	sm.configs = append(sm.configs, oneConfig(1))
 	sm.configs = append(sm.configs, oneConfig(2))
 
-	op := Op{Type: "Query"}
-	ret := sm.changeState(op)
+	ret := sm.changeState(Op{Type: "Query", Seq: 1, Num: 1})
+	if ret.Config.Num != 1 {
+		DTPrintf("config: %v\n", ret.Config)
+		t.Error("Not the config that was given")
+	}
+
+	ret = sm.changeState(Op{Type: "Query", Seq: 2, Num: 2})
 	if ret.Config.Num != 2 {
+		DTPrintf("ret: %v, lastest config: %v\n", ret, ret.Config)
 		t.Error("Not the config that was given")
 	}
 
