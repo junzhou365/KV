@@ -13,6 +13,7 @@ import "crypto/rand"
 import "math/big"
 import "shardmaster"
 import "time"
+import "sync"
 
 //
 // which shard is a key in?
@@ -40,6 +41,21 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	rw  sync.RWMutex
+	seq uint
+	uid int
+}
+
+func (ck *Clerk) increaseSeq() {
+	ck.rw.Lock()
+	defer ck.rw.Unlock()
+	ck.seq++
+}
+
+func (ck *Clerk) getSeq() uint {
+	ck.rw.RLock()
+	defer ck.rw.RUnlock()
+	return ck.seq
 }
 
 //
@@ -56,6 +72,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.uid = int(nrand())
 	return ck
 }
 
@@ -68,6 +85,9 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.State = ReqState{
+		Seq: ck.getSeq(),
+		Id:  ck.uid}
 
 	for {
 		shard := key2shard(key)
@@ -79,6 +99,7 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.increaseSeq()
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
@@ -103,7 +124,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.State = ReqState{
+		Seq: ck.getSeq(),
+		Id:  ck.uid}
 
 	for {
 		shard := key2shard(key)
@@ -114,6 +137,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
+					ck.increaseSeq()
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {

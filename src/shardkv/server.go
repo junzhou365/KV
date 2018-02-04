@@ -1,18 +1,28 @@
 package shardkv
 
-
-// import "shardmaster"
+import "shardmaster"
 import "labrpc"
 import "raft"
 import "sync"
 import "encoding/gob"
-
-
+import "time"
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Seq      uint // for de-duplicate reqs
+	Type     string
+	Key      string
+	Value    string
+	ClientId int
+}
+
+type Request struct {
+	resCh chan interface{}
+	op    *Op
+	index int
+	term  int
 }
 
 type ShardKV struct {
@@ -26,15 +36,240 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	mck           *shardmaster.Clerk
+	lastestConfig shardmaster.Config
+
+	persister  *raft.Persister
+	stateDelta int
+
+	state        KVState
+	liveRequests map[int]*Request
+	interval     time.Duration
 }
 
+func (kv *ShardKV) getRequest(i int) (*Request, bool) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	req, ok := kv.liveRequests[i]
+	return req, ok
+}
+
+func (kv *ShardKV) putRequest(i int, req *Request) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.liveRequests[i] = req
+}
+
+func (kv *ShardKV) delRequest(i int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	req, ok := kv.liveRequests[i]
+	if !ok {
+		panic("req doesn't exist")
+	}
+	close(req.resCh)
+	delete(kv.liveRequests, i)
+}
+
+func (kv *ShardKV) getConfig() shardmaster.Config {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	return kv.lastestConfig
+}
+
+func (kv *ShardKV) setConfig(config shardmaster.Config) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	kv.lastestConfig = config
+}
+
+func (kv *ShardKV) shardFetchLoop() {
+	for {
+		select {
+		case <-time.After(100 * time.Millisecond):
+			kv.setConfig(kv.mck.Query(-1))
+		}
+	}
+}
+
+func (kv *ShardKV) run() {
+
+	clearRequests := func() {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		for _, req := range kv.liveRequests {
+			close(req.resCh)
+		}
+
+		kv.liveRequests = make(map[int]*Request)
+	}
+
+	processMsg := func(msg raft.ApplyMsg) {
+		req, ok := kv.getRequest(msg.Index)
+
+		if !ok {
+			// No req for this msg
+			return
+		}
+
+		switch {
+		case msg.Term == req.term:
+			req.resCh <- msg.Command
+			kv.delRequest(req.index)
+
+		case msg.Term > req.term:
+			kv.delRequest(req.index)
+		}
+	}
+
+	// get a msg
+	// 1. found in requests:
+	//    a. msg.Term == req.Term. Succeed
+	//    b. msg.Term < req.Term. msg is lagged
+	//    c. msg.Term > req.Term. req was old and not cleared. Clear it. On the
+	//       commitOperation side, req might also lag.
+	// 2. not found: pass
+	//
+	// waiting for a msg
+	// 1. msg might lose. Polling the leadership state, 20 ms
+	//    a. keep waiting if we are leader
+	//    b. clear all requests if we lost leadershp
+	for {
+		select {
+		case msg := <-kv.applyCh:
+			if index := kv.state.getLastIncludedIndex(); msg.Index > 0 && msg.Index <= index {
+				DTPrintf("%d: skip snapshotted msg %d\n", kv.me, msg.Index)
+				continue
+			}
+
+			if msg.Snapshot != nil {
+				kv.saveOrRestoreSnapshot(msg.Snapshot, msg.UseSnapshot)
+				close(msg.SavedCh)
+				continue
+			}
+
+			DTPrintf("%d-%d: new msg %d, command %v\n", kv.gid, kv.me, msg.Index, msg.Command)
+
+			newOp := kv.changeState(msg.Command.(Op))
+			msg.Command = newOp
+
+			processMsg(msg)
+
+			kv.checkForTakingSnapshot(msg)
+
+		case <-time.After(kv.interval):
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				clearRequests()
+			}
+		}
+	}
+}
+
+func (kv *ShardKV) changeState(op Op) Op {
+	// Duplicate Op
+	if resOp, ok := kv.state.getDup(op.ClientId); ok && resOp.Seq == op.Seq {
+		return resOp
+	}
+
+	switch op.Type {
+	case "GET":
+		// nonexistent value is ok
+		value, _ := kv.state.getValue(op.Key)
+		op.Value = value
+	case "PUT":
+		kv.state.setValue(op.Key, op.Value)
+	case "APPEND":
+		kv.state.appendValue(op.Key, op.Value)
+	}
+
+	kv.state.setDup(op.ClientId, op)
+	return op
+}
+
+// invoke the agreement on operation.
+// return applied Op and WrongLeader
+func (kv *ShardKV) commitOperation(op Op) interface{} {
+	if config := kv.getConfig(); config.Shards[key2shard(op.Key)] != kv.gid {
+		return Err(ErrWrongGroup)
+	}
+
+	index, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		return true
+	}
+
+	req := &Request{
+		resCh: make(chan interface{}),
+		op:    &op,
+		index: index,
+		term:  term}
+
+	if _, ok := kv.getRequest(index); ok {
+		kv.delRequest(index)
+	}
+
+	kv.putRequest(index, req)
+	cmd := <-req.resCh
+
+	if cmd == nil {
+		return Err(ErrNotLeader)
+	}
+	return cmd
+}
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	DTPrintf("%d-%d: Server [Get], args: %+v\n", kv.gid, kv.me, args)
+
+	op := Op{
+		Seq:      args.State.Seq,
+		Type:     "GET",
+		ClientId: args.State.Id,
+		Key:      args.Key}
+
+	ret := kv.commitOperation(op)
+
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		reply.Value = ret.(Op).Value
+		reply.Err = OK
+	}
+
+	DTPrintf("%d-%d: Server [Get], for key %s, reply: %+v\n", kv.gid, kv.me, args.Key, reply)
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DTPrintf("%d-%d: Server [PutAppend], args: %+v\n", kv.gid, kv.me, args)
+	opType := "PUT"
+	if args.Op == "Append" {
+		opType = "APPEND"
+	}
+	op := Op{
+		Seq:      args.State.Seq,
+		Type:     opType,
+		ClientId: args.State.Id,
+		Key:      args.Key,
+		Value:    args.Value}
+
+	ret := kv.commitOperation(op)
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		reply.Err = OK
+	}
+
+	DTPrintf("%d-%d: Server [PutAppend], reply: %+v\n", kv.gid, kv.me, reply)
 }
 
 //
@@ -47,7 +282,6 @@ func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 }
-
 
 //
 // servers[] contains the ports of the servers in this group.
@@ -90,13 +324,22 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.masters = masters
 
 	// Your initialization code here.
+	kv.stateDelta = 20
+	kv.interval = 10 * time.Millisecond
+	kv.state = KVState{
+		Table:      make(map[string]string),
+		Duplicates: make(map[int]Op)}
+	kv.persister = persister
 
 	// Use something like this to talk to the shardmaster:
-	// kv.mck = shardmaster.MakeClerk(kv.masters)
+	kv.mck = shardmaster.MakeClerk(kv.masters)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	go kv.run()
+	go kv.shardFetchLoop()
+	DTPrintf("%d: is created\n", kv.me)
 
 	return kv
 }
