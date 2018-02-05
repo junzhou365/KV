@@ -104,6 +104,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.join(1)
+	DTESTPrintf("join 1")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -113,6 +114,7 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	cfg.leave(0)
+	DTESTPrintf("leave 0")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])

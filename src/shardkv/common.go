@@ -51,3 +51,13 @@ type GetReply struct {
 	Err         Err
 	Value       string
 }
+
+type MigrateArgs struct {
+	Table      map[string]string
+	Duplicates map[int]Op
+	GID        int // sender GID
+	Shard      int
+}
+
+type MigrateReply struct {
+}

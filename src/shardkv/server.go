@@ -11,11 +11,15 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Seq      uint // for de-duplicate reqs
 	Type     string
+	Seq      uint // for de-duplicate reqs
+	ClientId int
 	Key      string
 	Value    string
-	ClientId int
+	GID      int
+	Names    []string
+	Shard    int
+	PrevGID  int
 }
 
 type Request struct {
@@ -38,6 +42,8 @@ type ShardKV struct {
 	// Your definitions here.
 	mck           *shardmaster.Clerk
 	lastestConfig shardmaster.Config
+	shards        [shardmaster.NShards]int // the shards state ShardKV has
+	rpcCh         chan *MigrationReq
 
 	persister  *raft.Persister
 	stateDelta int
@@ -86,11 +92,53 @@ func (kv *ShardKV) setConfig(config shardmaster.Config) {
 	kv.lastestConfig = config
 }
 
+func (kv *ShardKV) setShard(shard int, gid int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	kv.shards[shard] = gid
+}
+
+func (kv *ShardKV) getShard(shard int) (gid int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	gid = kv.shards[shard]
+	return gid
+}
+
+func (kv *ShardKV) isShardOwned(shard int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	return kv.gid == kv.shards[shard]
+}
+
 func (kv *ShardKV) shardFetchLoop() {
 	for {
 		select {
-		case <-time.After(100 * time.Millisecond):
-			kv.setConfig(kv.mck.Query(-1))
+		case <-time.After(50 * time.Millisecond):
+			config := kv.mck.Query(-1)
+			prevConfig := kv.getConfig()
+			// The requests with affected key range should be rejected immediately
+			kv.setConfig(config)
+			// kv.shards is updated after servers agree on re-configing
+			for shard, newGID := range config.Shards {
+				if newGID == kv.gid && !kv.isShardOwned(shard) {
+					kv.rf.Start(Op{
+						Type:    "JOIN",
+						Shard:   shard,
+						PrevGID: prevConfig.Shards[shard]})
+				}
+
+				if newGID != kv.gid && kv.isShardOwned(shard) {
+					kv.rf.Start(Op{
+						Type:  "LEAVE",
+						Shard: shard,
+						GID:   newGID,
+						Names: config.Groups[newGID]})
+				}
+			}
 		}
 	}
 }
@@ -137,24 +185,41 @@ func (kv *ShardKV) run() {
 	// 1. msg might lose. Polling the leadership state, 20 ms
 	//    a. keep waiting if we are leader
 	//    b. clear all requests if we lost leadershp
+LOOP:
 	for {
 		select {
 		case msg := <-kv.applyCh:
 			if index := kv.state.getLastIncludedIndex(); msg.Index > 0 && msg.Index <= index {
 				DTPrintf("%d: skip snapshotted msg %d\n", kv.me, msg.Index)
-				continue
+				continue LOOP
 			}
 
 			if msg.Snapshot != nil {
 				kv.saveOrRestoreSnapshot(msg.Snapshot, msg.UseSnapshot)
 				close(msg.SavedCh)
-				continue
+				continue LOOP
 			}
 
-			DTPrintf("%d-%d: new msg %d, command %v\n", kv.gid, kv.me, msg.Index, msg.Command)
+			DTPrintf("%d-%d: new msg %d, command %+v\n", kv.gid, kv.me, msg.Index, msg.Command)
+			op := msg.Command.(Op)
+			switch op.Type {
+			case "LEAVE":
+				kv.sendMigration(op.Shard, op.Names)
+				kv.setShard(op.Shard, op.GID)
+				continue LOOP
 
-			newOp := kv.changeState(msg.Command.(Op))
-			msg.Command = newOp
+			case "JOIN":
+				kv.receiveMigration(op, msg.Index, msg.Term)
+				kv.setShard(op.Shard, kv.gid)
+				continue LOOP
+			}
+
+			if !kv.isShardOwned(key2shard(op.Key)) {
+				msg.Command = Err(ErrWrongGroup)
+			} else {
+				newOp := kv.changeState(op)
+				msg.Command = newOp
+			}
 
 			processMsg(msg)
 
@@ -179,8 +244,10 @@ func (kv *ShardKV) changeState(op Op) Op {
 		// nonexistent value is ok
 		value, _ := kv.state.getValue(op.Key)
 		op.Value = value
+
 	case "PUT":
 		kv.state.setValue(op.Key, op.Value)
+
 	case "APPEND":
 		kv.state.appendValue(op.Key, op.Value)
 	}
@@ -330,6 +397,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 		Table:      make(map[string]string),
 		Duplicates: make(map[int]Op)}
 	kv.persister = persister
+	kv.rpcCh = make(chan *MigrationReq)
 
 	// Use something like this to talk to the shardmaster:
 	kv.mck = shardmaster.MakeClerk(kv.masters)
@@ -339,7 +407,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	go kv.run()
 	go kv.shardFetchLoop()
-	DTPrintf("%d: is created\n", kv.me)
+	DTPrintf("%d-%d: is created\n", kv.gid, kv.me)
 
 	return kv
 }
