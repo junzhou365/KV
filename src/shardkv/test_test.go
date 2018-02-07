@@ -145,6 +145,7 @@ func TestSnapshot(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	DTESTPrintf("0 joined")
 
 	n := 30
 	ka := make([]string, n)
@@ -161,6 +162,7 @@ func TestSnapshot(t *testing.T) {
 	cfg.join(1)
 	cfg.join(2)
 	cfg.leave(0)
+	DTESTPrintf("1, 2 joined. 0 left")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -171,6 +173,7 @@ func TestSnapshot(t *testing.T) {
 
 	cfg.leave(1)
 	cfg.join(0)
+	DTESTPrintf("0 joined. 1 left")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -193,6 +196,8 @@ func TestSnapshot(t *testing.T) {
 	cfg.ShutdownGroup(1)
 	cfg.ShutdownGroup(2)
 
+	DTESTPrintf("Shut down all groups")
+
 	cfg.StartGroup(0)
 	cfg.StartGroup(1)
 	cfg.StartGroup(2)
@@ -213,6 +218,7 @@ func TestMissChange(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	DTESTPrintf("0 joined")
 
 	n := 10
 	ka := make([]string, n)
@@ -227,14 +233,18 @@ func TestMissChange(t *testing.T) {
 	}
 
 	cfg.join(1)
+	DTESTPrintf("1 joined")
 
 	cfg.ShutdownServer(0, 0)
 	cfg.ShutdownServer(1, 0)
 	cfg.ShutdownServer(2, 0)
 
+	DTESTPrintf("(0,0), (1,0), (2,0) shut down")
+
 	cfg.join(2)
 	cfg.leave(1)
 	cfg.leave(0)
+	DTESTPrintf("2 joined. 0, 1 left")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -244,6 +254,7 @@ func TestMissChange(t *testing.T) {
 	}
 
 	cfg.join(1)
+	DTESTPrintf("1 joined")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -255,6 +266,7 @@ func TestMissChange(t *testing.T) {
 	cfg.StartServer(0, 0)
 	cfg.StartServer(1, 0)
 	cfg.StartServer(2, 0)
+	DTESTPrintf("(0,0), (1,0), (2,0) restarted")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -268,9 +280,11 @@ func TestMissChange(t *testing.T) {
 	cfg.ShutdownServer(0, 1)
 	cfg.ShutdownServer(1, 1)
 	cfg.ShutdownServer(2, 1)
+	DTESTPrintf("(0,1), (1,1), (2,1) shut down")
 
 	cfg.join(0)
 	cfg.leave(2)
+	DTESTPrintf("0 joined. 2 left")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -282,6 +296,7 @@ func TestMissChange(t *testing.T) {
 	cfg.StartServer(0, 1)
 	cfg.StartServer(1, 1)
 	cfg.StartServer(2, 1)
+	DTESTPrintf("(0,1), (1,1), (2,1) restarted")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])

@@ -1,30 +1,30 @@
 package shardkv
 
 import (
-	"sync"
+	"fmt"
 	"time"
 )
 
-type MigrationReq struct {
-	Table      map[string]string
-	Duplicates map[int]Op
-	GID        int
-	done       chan interface{}
-}
-
 func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
-	DTPrintf("%d-%d: Server [Migrate], args: %+v\n", kv.gid, kv.me, args)
-	defer DTPrintf("%d-%d: Server [Migrate], reply: %+v\n", kv.gid, kv.me, reply)
+	kv.KVLeaderPrintf("Server [Migrate] from %d, args: %+v", args.GID, args)
+	//defer DTPrintf("%d-%d: Server [Migrate] from %d, reply: %+v\n", kv.gid, kv.me, args.GID, reply)
 
-	req := MigrationReq{
+	ret := kv.commitOperation(Op{
+		Type:    "JOIN",
+		Shard:   args.Shard,
+		PrevGID: args.GID,
+
 		Table:      args.Table,
-		Duplicates: args.Duplicates,
-		GID:        args.GID,
-		done:       make(chan interface{})}
+		Duplicates: args.Duplicates})
 
-	kv.rpcCh <- &req
-	<-req.done
-
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		reply.Err = Err(OK)
+	}
 }
 
 func (kv *ShardKV) receiveMigration(op Op, index int, term int) {
@@ -33,31 +33,20 @@ func (kv *ShardKV) receiveMigration(op Op, index int, term int) {
 		return
 	}
 
-	DTPrintf("%d-%d: receive Migration, op: %+v\n", kv.gid, kv.me, op)
-	defer DTPrintf("%d-%d: done Migration, op: %+v\n", kv.gid, kv.me, op)
-
-	// wait for migration req from leaving shards
-	req := <-kv.rpcCh
-	defer close(req.done)
-
-	if op.PrevGID != req.GID {
-		DTPrintf("%d-%d: Migration op %+v mismatch with %d\n", kv.gid, kv.me, op, req.GID)
-	}
+	//kv.DTPrintf("%d-%d: receive Migration, op: %+v\n", kv.gid, kv.me, op)
+	//defer DTPrintf("%d-%d: done Migration, op: %+v\n", kv.gid, kv.me, op)
 
 	kv.state.rw.Lock()
-	for k, v := range req.Table {
+	//DTPrintf("%d-%d: receive Migration, table: %v, duplicates: %v\n",
+	//kv.gid, kv.me, *op.Table, *op.Duplicates)
+	for k, v := range op.Table {
+		if _, ok := kv.state.Table[k]; ok {
+			panic(fmt.Sprintf("%d-%d: Key %v exists", kv.gid, kv.me, k))
+		}
 		kv.state.Table[k] = v
 	}
-	kv.state.rw.Unlock()
 
-	// must take snapshot here because we don't have the log for these kv states
-	if kv.maxraftstate != -1 {
-		kv.takeSnapshot(index, term)
-		go kv.rf.DiscardLogEnries(index, term)
-	}
-
-	kv.state.rw.Lock()
-	for id, op := range req.Duplicates {
+	for id, op := range op.Duplicates {
 		if origOp, ok := kv.state.Duplicates[id]; !ok {
 			kv.state.Duplicates[id] = op
 		} else {
@@ -67,48 +56,84 @@ func (kv *ShardKV) receiveMigration(op Op, index int, term int) {
 			}
 		}
 	}
+	kv.KVPrintf("MigrateDone, table: %v, dup: %v, shards: %v",
+		kv.state.Table, kv.state.Duplicates, kv.state.Shards)
 	kv.state.rw.Unlock()
+
+	// must take snapshot here because we don't have the log for these kv states
+	//if kv.maxraftstate != -1 {
+	//kv.takeSnapshot(index, term)
+	//go kv.rf.DiscardLogEnries(index, term)
+	//kv.KVPrintf("after snapshot, table: %v, dup: %v, shards: %v",
+	//kv.state.Table, kv.state.Duplicates, kv.state.Shards)
+	//}
 }
 
 // used for servers that lost shard
-func (kv *ShardKV) sendMigration(shard int, names []string) {
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		return
-	}
-
-	DTPrintf("%d-%d: [LEAVE] send Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
-	defer DTPrintf("%d-%d: [LEAVE] done Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
-
-	var args MigrateArgs
+func (kv *ShardKV) updateAndSendMigration(shard int, names []string) {
 	table := make(map[string]string)
-	kv.state.rw.RLock()
+	duplicates := make(map[int]Op)
+
+	kv.state.rw.Lock()
 	for key, value := range kv.state.Table {
 		if key2shard(key) == shard {
 			table[key] = value
 		}
 	}
+
+	for k := range table {
+		delete(kv.state.Table, k)
+	}
+
+	kv.KVPrintf("[LEAVE] for shard %v update table: %v, arg table: %v",
+		shard, kv.state.Table, table)
+
+	for k, v := range kv.state.Duplicates {
+		duplicates[k] = v
+	}
+
+	kv.state.rw.Unlock()
+
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		return
+	}
+
+	//DTPrintf("%d-%d: [LEAVE] send Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
+	//defer DTPrintf("%d-%d: [LEAVE] done Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
+
+	var args MigrateArgs
 	args = MigrateArgs{
 		Table:      table,
-		Duplicates: kv.state.Duplicates,
+		Duplicates: duplicates,
 		Shard:      shard,
-		GID:        kv.gid}
-	kv.state.rw.RUnlock()
+		GID:        kv.gid,
+		Index:      kv.me}
 
-	var wg sync.WaitGroup
+	resCh := make(chan bool)
+	done := make(chan interface{})
+	defer close(done)
+
 	for _, server := range names {
-		wg.Add(1)
 		go func(server string) {
-			defer wg.Done()
 			for {
 				reply := MigrateReply{}
 				srv := kv.make_end(server)
 				ok := srv.Call("ShardKV.Migrate", &args, &reply)
-				if ok {
+				if ok && reply.Err == OK {
+					resCh <- true
 					return
 				}
+
+				select {
+				case <-done:
+					return
+				default:
+				}
+
 				time.Sleep(100 * time.Millisecond)
 			}
 		}(server)
 	}
-	wg.Wait()
+
+	<-resCh
 }

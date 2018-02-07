@@ -57,7 +57,10 @@ type MigrateArgs struct {
 	Duplicates map[int]Op
 	GID        int // sender GID
 	Shard      int
+	Index      int // for debug
 }
 
 type MigrateReply struct {
+	WrongLeader bool
+	Err         Err
 }

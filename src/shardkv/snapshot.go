@@ -3,6 +3,7 @@ package shardkv
 import (
 	"bytes"
 	"encoding/gob"
+	"fmt"
 	"raft"
 )
 
@@ -11,6 +12,7 @@ func (kv *ShardKV) takeSnapshot(lastIndex int, lastTerm int) {
 	e := gob.NewEncoder(w)
 
 	kv.state.rw.Lock()
+	kv.checkSnapshotHealth("take snapshot")
 	kv.state.lastIncludedIndex = lastIndex
 	kv.state.lastIncludedTerm = lastTerm
 
@@ -18,11 +20,15 @@ func (kv *ShardKV) takeSnapshot(lastIndex int, lastTerm int) {
 	e.Encode(kv.state.lastIncludedTerm)
 	e.Encode(kv.state.Table)
 	e.Encode(kv.state.Duplicates)
+	e.Encode(kv.state.Shards)
+	kv.KVPrintf("snapshot taken. table: %v, duplicates: %v, shards: %v",
+		kv.state.Table, kv.state.Duplicates, kv.state.Shards)
 	kv.state.rw.Unlock()
 
 	snapshot := w.Bytes()
 	// Protected by Serialize
 	kv.persister.SaveSnapshot(snapshot)
+
 }
 
 func (kv *ShardKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
@@ -32,20 +38,21 @@ func (kv *ShardKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
 	// The raft size might be reduced by raft taking snapshots. But it's ok.
 	if kv.maxraftstate-kv.persister.RaftStateSize() <= kv.stateDelta {
 		if msg.Index <= kv.state.getLastIncludedIndex() {
-			DTPrintf("%d: new snapshot was given for %+v. Just return\n", kv.me, msg)
+			DTPrintf("%d-%d: new snapshot was given for %+v. Just return\n",
+				kv.gid, kv.me, msg)
 			return
 		}
 
-		DTPrintf("%d: take snapshot\n", kv.me)
+		kv.KVPrintf("take snapshot")
 		// we must first save snapshot
 		kv.takeSnapshot(msg.Index, msg.Term)
 		go kv.rf.DiscardLogEnries(msg.Index, msg.Term)
+		//kv.KVPrintf("after snapshot, table: %v, dup: %v, shards: %v",
+		//kv.state.Table, kv.state.Duplicates, kv.state.Shards)
 	}
 }
 
 func (kv *ShardKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
-	defer DTPrintf("%d: restore snapshot use: %t, done\n", kv.me, use)
-
 	if snapshot == nil { // bootstrap
 		snapshot = kv.persister.ReadSnapshot()
 	}
@@ -65,10 +72,14 @@ func (kv *ShardKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 		d.Decode(&kv.state.lastIncludedTerm)
 		d.Decode(&kv.state.Table)
 		d.Decode(&kv.state.Duplicates)
+		d.Decode(&kv.state.Shards)
 
-		DTPrintf("%d: snapshot restored. lastIndex: %d, lastTerm: %d\n",
-			kv.me, kv.state.lastIncludedIndex, kv.state.lastIncludedTerm)
+		kv.KVPrintf("snapshot restored. table: %v, duplicates: %v, shards: %v",
+			kv.state.Table, kv.state.Duplicates, kv.state.Shards)
+
+		kv.checkSnapshotHealth("receive snapshot")
 		kv.state.rw.Unlock()
+
 	}
 }
 
@@ -77,4 +88,14 @@ func (kv *ShardKV) loadBaseLogEntry() {
 	defer kv.state.rw.RUnlock()
 
 	kv.rf.LoadBaseLogEntry(kv.state.lastIncludedIndex, kv.state.lastIncludedTerm)
+}
+
+// For debug
+func (kv *ShardKV) checkSnapshotHealth(s string) {
+	for k, _ := range kv.state.Table {
+		if kv.state.Shards[key2shard(k)] != kv.gid {
+			panic(fmt.Sprintf("%d-%d: health check failed for %s. Key: %v",
+				kv.gid, kv.me, s, k))
+		}
+	}
 }
