@@ -496,6 +496,11 @@ func (rf *Raft) commitLoop() {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	return rf.StartWithFunc(command, nil)
+}
+
+// f will be executed before the new entry put into agreement process
+func (rf *Raft) StartWithFunc(command interface{}, f func(int, int)) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
@@ -507,6 +512,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.state.getCurrentTerm()
 		DTPrintf("%d: Start is called with command %+v\n", rf.me, command)
 		index = rf.state.appendLogEntry(RaftLogEntry{Term: term, Command: command})
+		if f != nil {
+			f(index, term)
+			DTPrintf("%d: f %v is executed\n", rf.me, f)
+		}
 		go func() { rf.newEntry <- index }()
 		DTPrintf("%d: Start call on leader with command %v finished at index: %d\n",
 			rf.me, command, index)

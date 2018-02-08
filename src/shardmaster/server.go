@@ -68,7 +68,6 @@ type Op struct {
 
 type Request struct {
 	resCh chan interface{}
-	op    *Op
 	index int
 	term  int
 }
@@ -323,23 +322,24 @@ func (sm *ShardMaster) changeState(op Op) Op {
 // invoke the agreement on operation.
 // return applied Op and WrongLeader
 func (sm *ShardMaster) commitOperation(op Op) interface{} {
-	index, term, isLeader := sm.rf.Start(op)
+	req := &Request{resCh: make(chan interface{})}
+
+	putReq := func(index int, term int) {
+		req.index = index
+		req.term = term
+		if _, ok := sm.getRequest(req.index); ok {
+			//DTPrintf("%d: outdated req %+v was not cleared\n", sm.me, oldReq)
+			sm.delRequest(req.index)
+		}
+
+		sm.putRequest(req.index, req)
+	}
+
+	_, _, isLeader := sm.rf.StartWithFunc(op, putReq)
 	if !isLeader {
 		return true
 	}
 
-	req := &Request{
-		resCh: make(chan interface{}),
-		op:    &op,
-		index: index,
-		term:  term}
-
-	if _, ok := sm.getRequest(index); ok {
-		//DTPrintf("%d: outdated req %+v was not cleared\n", sm.me, oldReq)
-		sm.delRequest(index)
-	}
-
-	sm.putRequest(index, req)
 	config := <-req.resCh
 
 	DTPrintf("%d: config from commitOperation is %+v\n", sm.me, config)

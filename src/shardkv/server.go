@@ -327,24 +327,26 @@ func (kv *ShardKV) changeState(op Op) Op {
 // invoke the agreement on operation.
 // return applied Op and WrongLeader
 func (kv *ShardKV) commitOperation(op Op) interface{} {
-	index, term, isLeader := kv.rf.Start(op)
+	req := &Request{resCh: make(chan interface{})}
+
+	putReq := func(index int, term int) {
+		req.index = index
+		req.term = term
+		if _, ok := kv.getRequest(req.index); ok {
+			//DTPrintf("%d: outdated req %+v was not cleared\n", kv.me, oldReq)
+			kv.delRequest(req.index)
+		}
+
+		kv.putRequest(req.index, req)
+	}
+
+	_, _, isLeader := kv.rf.StartWithFunc(op, putReq)
 	if !isLeader {
 		return true
 	}
 
-	kv.KVLeaderPrintf("new op %v with index %v", op, index)
+	kv.KVLeaderPrintf("new op %v with index %v", op, req.index)
 
-	req := &Request{
-		resCh: make(chan interface{}),
-		op:    &op,
-		index: index,
-		term:  term}
-
-	if _, ok := kv.getRequest(index); ok {
-		kv.delRequest(index)
-	}
-
-	kv.putRequest(index, req)
 	cmd := <-req.resCh
 
 	if cmd == nil {
