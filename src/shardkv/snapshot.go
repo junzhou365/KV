@@ -5,6 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"raft"
+	"shardmaster"
 )
 
 func (kv *ShardKV) takeSnapshot(lastIndex int, lastTerm int) {
@@ -21,14 +22,14 @@ func (kv *ShardKV) takeSnapshot(lastIndex int, lastTerm int) {
 	e.Encode(kv.state.Table)
 	e.Encode(kv.state.Duplicates)
 	e.Encode(kv.state.Shards)
-	kv.KVPrintf("snapshot taken. table: %v, duplicates: %v, shards: %v",
-		kv.state.Table, kv.state.Duplicates, kv.state.Shards)
-	kv.state.rw.Unlock()
-
+	e.Encode(kv.state.ConfigNums)
 	snapshot := w.Bytes()
+	//kv.KVPrintf("snapshot taken. lastIndex: %v, table: %v, duplicates: %v, shards: %v",
+	//lastIndex, kv.state.Table, kv.state.Duplicates, kv.state.Shards)
+
 	// Protected by Serialize
 	kv.persister.SaveSnapshot(snapshot)
-
+	kv.state.rw.Unlock()
 }
 
 func (kv *ShardKV) checkForTakingSnapshot(msg raft.ApplyMsg) {
@@ -64,22 +65,39 @@ func (kv *ShardKV) saveOrRestoreSnapshot(snapshot []byte, use bool) {
 	kv.persister.SaveSnapshot(snapshot)
 
 	if use {
+		kv.state.rw.Lock()
 		r := bytes.NewBuffer(snapshot)
 		d := gob.NewDecoder(r)
 
-		kv.state.rw.Lock()
-		d.Decode(&kv.state.lastIncludedIndex)
-		d.Decode(&kv.state.lastIncludedTerm)
-		d.Decode(&kv.state.Table)
-		d.Decode(&kv.state.Duplicates)
-		d.Decode(&kv.state.Shards)
+		var lastIndex int
+		d.Decode(&lastIndex)
+		kv.state.lastIncludedIndex = lastIndex
 
-		kv.KVPrintf("snapshot restored. table: %v, duplicates: %v, shards: %v",
-			kv.state.Table, kv.state.Duplicates, kv.state.Shards)
+		var lastTerm int
+		d.Decode(&lastTerm)
+		kv.state.lastIncludedTerm = lastTerm
+
+		var table map[string]string
+		d.Decode(&table)
+		kv.state.Table = table
+
+		var duplicates map[int]Op
+		d.Decode(&duplicates)
+		kv.state.Duplicates = duplicates
+
+		var shards [shardmaster.NShards]int
+		d.Decode(&shards)
+		kv.state.Shards = shards
+
+		var nums [shardmaster.NShards]int
+		d.Decode(&nums)
+		kv.state.ConfigNums = nums
+
+		//kv.KVPrintf("snapshot restored. lastIndex: %v, table: %v, duplicates: %v, shards: %v",
+		//kv.state.lastIncludedIndex, kv.state.Table, kv.state.Duplicates, kv.state.Shards)
 
 		kv.checkSnapshotHealth("receive snapshot")
 		kv.state.rw.Unlock()
-
 	}
 }
 

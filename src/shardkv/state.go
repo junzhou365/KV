@@ -19,6 +19,8 @@ type KVState struct {
 	// We need to put his into snapshot. Modification on this is coordinated by
 	// raft sequential operations.
 	Shards [shardmaster.NShards]int
+	// highest config num that the servers agreed on per shard
+	ConfigNums [shardmaster.NShards]int
 
 	lastIncludedIndex int
 	lastIncludedTerm  int
@@ -76,4 +78,18 @@ func (k *KVState) getShardGID(shard int) (gid int) {
 
 	gid = k.Shards[shard]
 	return gid
+}
+
+func (k *KVState) setNum(shard int, num int) {
+	k.rw.Lock()
+	defer k.rw.Unlock()
+
+	k.ConfigNums[shard] = num
+}
+
+func (k *KVState) getNum(shard int) int {
+	k.rw.RLock()
+	defer k.rw.RUnlock()
+
+	return k.ConfigNums[shard]
 }

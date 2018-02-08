@@ -13,6 +13,7 @@ func (kv *ShardKV) Migrate(args *MigrateArgs, reply *MigrateReply) {
 		Type:    "JOIN",
 		Shard:   args.Shard,
 		PrevGID: args.GID,
+		Num:     args.Num,
 
 		Table:      args.Table,
 		Duplicates: args.Duplicates})
@@ -70,7 +71,7 @@ func (kv *ShardKV) receiveMigration(op Op, index int, term int) {
 }
 
 // used for servers that lost shard
-func (kv *ShardKV) updateAndSendMigration(shard int, names []string) {
+func (kv *ShardKV) updateAndSendMigration(shard int, num int, gid int, names []string) {
 	table := make(map[string]string)
 	duplicates := make(map[int]Op)
 
@@ -98,6 +99,10 @@ func (kv *ShardKV) updateAndSendMigration(shard int, names []string) {
 		return
 	}
 
+	if gid == 0 {
+		return
+	}
+
 	//DTPrintf("%d-%d: [LEAVE] send Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
 	//defer DTPrintf("%d-%d: [LEAVE] done Migration for shard %v to names: %v\n", kv.gid, kv.me, shard, names)
 
@@ -106,6 +111,7 @@ func (kv *ShardKV) updateAndSendMigration(shard int, names []string) {
 		Table:      table,
 		Duplicates: duplicates,
 		Shard:      shard,
+		Num:        num,
 		GID:        kv.gid,
 		Index:      kv.me}
 
@@ -136,4 +142,71 @@ func (kv *ShardKV) updateAndSendMigration(shard int, names []string) {
 	}
 
 	<-resCh
+}
+
+func (kv *ShardKV) QueryOwner(args *QueryOwnerArgs, reply *QueryOwnerReply) {
+	kv.KVLeaderPrintf("Server [QueryOwner] from %d, args: %+v", args.GID, args)
+	defer kv.KVLeaderPrintf("Server [QueryOwner] done from %d, args: %+v", args.GID, reply)
+
+	ret := kv.commitOperation(Op{
+		Type:    "QueryOwner",
+		Shard:   args.Shard,
+		PrevGID: args.GID})
+
+	switch ret.(type) {
+	case bool:
+		reply.WrongLeader = true
+	case Err:
+		reply.Err = ret.(Err)
+	default:
+		reply.Err = Err(OK)
+		reply.Owner = ret.(int)
+	}
+}
+
+func (kv *ShardKV) queryOwnership(shard int, gid int, names []string) bool {
+	if gid == 0 {
+		return false
+	}
+	kv.KVLeaderPrintf("[QueryOwner] send Query for shard %v to names: %v\n",
+		shard, names)
+	defer kv.KVLeaderPrintf("[QueryOwner] done Query for shard %v to names: %v\n",
+		shard, names)
+
+	var args QueryOwnerArgs
+	args = QueryOwnerArgs{
+		Shard: shard,
+		GID:   kv.gid}
+
+	resCh := make(chan int)
+	done := make(chan interface{})
+	defer close(done)
+
+	for _, server := range names {
+		go func(server string) {
+			for {
+				reply := QueryOwnerReply{}
+				srv := kv.make_end(server)
+				ok := srv.Call("ShardKV.QueryOwner", &args, &reply)
+				if ok && reply.Err == OK {
+					resCh <- reply.Owner
+					return
+				}
+
+				select {
+				case <-done:
+					return
+				default:
+				}
+
+				time.Sleep(100 * time.Millisecond)
+			}
+		}(server)
+	}
+
+	ret := <-resCh
+	if ret > 0 {
+		return true
+	}
+	return false
 }

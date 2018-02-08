@@ -58,9 +58,21 @@ type MigrateArgs struct {
 	GID        int // sender GID
 	Shard      int
 	Index      int // for debug
+	Num        int
 }
 
 type MigrateReply struct {
 	WrongLeader bool
+	Err         Err
+}
+
+type QueryOwnerArgs struct {
+	Shard int
+	GID   int
+}
+
+type QueryOwnerReply struct {
+	WrongLeader bool
+	Owner       int
 	Err         Err
 }

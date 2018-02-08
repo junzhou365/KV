@@ -23,6 +23,7 @@ type Op struct {
 	Names   []string
 	Shard   int
 	PrevGID int
+	Num     int
 
 	Table      map[string]string
 	Duplicates map[int]Op
@@ -56,10 +57,11 @@ type ShardKV struct {
 	liveRequests map[int]*Request
 	interval     time.Duration
 
-	// The server a left, sent migration msg to another server b. Now these
-	// servers restarted. a replays LEAVE and sends msg to b again, which
-	// causes panic since b has got the migration. We need a way to avoid this
+	// The server A left, sent migration msg to another server B. Now these
+	// servers restarted. A replays LEAVE and sends msg to B again, which
+	// causes panic since B has got the migration. We need a way to avoid this
 	// dup.
+	// Used "A must have the shard before leaving"
 }
 
 func (kv *ShardKV) getRequest(i int) (*Request, bool) {
@@ -94,11 +96,16 @@ func (kv *ShardKV) getConfig() shardmaster.Config {
 	return kv.lastestConfig
 }
 
-func (kv *ShardKV) setConfig(config shardmaster.Config) {
+func (kv *ShardKV) setConfig(config shardmaster.Config) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	kv.lastestConfig = config
+	if config.Num > kv.lastestConfig.Num {
+		kv.lastestConfig = config
+		return true
+	}
+
+	return false
 }
 
 func (kv *ShardKV) isShardOwned(shard int) bool {
@@ -109,37 +116,71 @@ func (kv *ShardKV) shardFetchLoop() {
 	for {
 		select {
 		case <-time.After(50 * time.Millisecond):
+
+			config := kv.mck.Query(-1)
+			kv.KVPrintf("new config: %v", config)
+			// kv.shards is updated after servers agree on re-configing
+			kv.setConfig(config)
+
 			if _, isLeader := kv.rf.GetState(); !isLeader {
 				continue
 			}
-			config := kv.mck.Query(-1)
-			oldConfig := kv.getConfig()
-			kv.KVPrintf("new config: %v", config)
-			// The requests with affected key range should be rejected immediately
-			kv.setConfig(config)
-			// kv.shards is updated after servers agree on re-configing
-			kv.KVPrintf("the shards is %v", kv.state.Shards)
+
+		SHARDS_LOOP:
 			for shard, newGID := range config.Shards {
-				// Initial gid
-				if newGID == kv.gid && kv.state.getShardGID(shard) == 0 &&
-					oldConfig.Shards[shard] == 0 {
-					index, term, _ := kv.rf.Start(Op{
-						Type:    "JOIN",
-						Shard:   shard,
-						PrevGID: 0})
-					kv.KVPrintf("found -JOIN- initial for shard: %v, index: %v, term: %v",
-						shard, index, term)
+				if config.Num <= kv.state.getNum(shard) {
+					continue SHARDS_LOOP
 				}
 
 				if newGID != kv.gid && kv.isShardOwned(shard) {
 					index, term, _ := kv.rf.Start(Op{
 						Type:  "LEAVE",
+						Num:   config.Num,
 						Shard: shard,
 						GID:   newGID,
 						Names: config.Groups[newGID]})
 					kv.KVPrintf("found -LEAVE- to %v for shard: %v, index: %v, term: %v",
 						newGID, shard, index, term)
+					continue SHARDS_LOOP
 				}
+
+				if newGID != kv.gid || kv.isShardOwned(shard) {
+					continue SHARDS_LOOP
+				}
+
+				configMap := make(map[int]shardmaster.Config)
+				configMap[0] = shardmaster.Config{}
+
+				num := config.Num - 1
+				for ; num >= kv.state.getNum(shard); num-- {
+					prevConfig, ok := configMap[num]
+					if !ok {
+						prevConfig = kv.mck.Query(num)
+						configMap[num] = prevConfig
+					}
+					kv.KVLeaderPrintf("prev config: %v", prevConfig)
+
+					prevShardGID := prevConfig.Shards[shard]
+					kv.KVLeaderPrintf("prevShardGID: %v", prevShardGID)
+					if prevShardGID != kv.gid && prevShardGID != 0 {
+						ownedByOther := kv.queryOwnership(
+							shard, prevShardGID, prevConfig.Groups[prevShardGID])
+						kv.KVLeaderPrintf("found shard %v owned by %v: %t",
+							shard, prevShardGID, ownedByOther)
+						if ownedByOther {
+							continue SHARDS_LOOP
+						}
+					}
+
+				}
+
+				index, term, _ := kv.rf.Start(Op{
+					Type:    "JOIN",
+					Num:     config.Num,
+					Shard:   shard,
+					PrevGID: 0})
+				kv.KVPrintf("found -JOIN- initial for shard: %v, index: %v, term: %v",
+					shard, index, term)
 			}
 		}
 	}
@@ -207,22 +248,36 @@ LOOP:
 
 			switch op.Type {
 			case "LEAVE":
-				if kv.isShardOwned(op.Shard) {
-					kv.updateAndSendMigration(op.Shard, op.Names)
+				if kv.isShardOwned(op.Shard) && kv.state.getNum(op.Shard) < op.Num {
+					kv.updateAndSendMigration(op.Shard, op.Num, op.GID, op.Names)
 					kv.state.setShard(op.Shard, op.GID)
+					kv.state.setNum(op.Shard, op.Num)
 					kv.state.rw.RLock()
 					kv.KVPrintf("shard is updated to %v", kv.state.Shards)
 					kv.state.rw.RUnlock()
+				} else {
+					kv.KVPrintf("new msg %d, command %+v is omitted", msg.Index, msg.Command)
 				}
 
 			case "JOIN":
-				if !kv.isShardOwned(op.Shard) {
+				if !kv.isShardOwned(op.Shard) && kv.state.getNum(op.Shard) < op.Num {
 					kv.receiveMigration(op, msg.Index, msg.Term)
 					kv.state.setShard(op.Shard, kv.gid)
+					kv.state.setNum(op.Shard, op.Num)
 					kv.state.rw.RLock()
 					kv.KVPrintf("shard is updated to %v", kv.state.Shards)
 					kv.state.rw.RUnlock()
+				} else {
+					kv.KVPrintf("new msg %d, command %+v is omitted", msg.Index, msg.Command)
 				}
+
+			case "QueryOwner":
+				msg.Command = 0
+				if kv.isShardOwned(op.Shard) {
+					msg.Command = kv.gid
+				}
+				kv.KVLeaderPrintf("Query shard %v. Owned: %t",
+					op.Shard, kv.isShardOwned(op.Shard))
 
 			default:
 				if !kv.isShardOwned(key2shard(op.Key)) {
@@ -422,6 +477,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
 	kv.saveOrRestoreSnapshot(nil, true)
 
 	go kv.run()

@@ -26,7 +26,9 @@ func TestStaticShards(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	DTESTPrintf("0 joined")
 	cfg.join(1)
+	DTESTPrintf("1 joined")
 
 	n := 10
 	ka := make([]string, n)
@@ -34,16 +36,21 @@ func TestStaticShards(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(20)
+		DTESTPrintf("[%v]: Put (%v, %v)", i, ka[i], va[i])
 		ck.Put(ka[i], va[i])
+		DTESTPrintf("[%v]: Put (%v, %v) Succeeded", i, ka[i], va[i])
 	}
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
 
+	DTESTPrintf("midway")
+
 	// make sure that the data really is sharded by
 	// shutting down one shard and checking that some
 	// Get()s don't succeed.
 	cfg.ShutdownGroup(1)
+	DTESTPrintf("1 shut down")
 	cfg.checklogs() // forbid snapshots
 
 	ch := make(chan bool)
@@ -74,6 +81,7 @@ func TestStaticShards(t *testing.T) {
 
 	// bring the crashed shard/group back to life.
 	cfg.StartGroup(1)
+	DTESTPrintf("1 restarted")
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
 	}
@@ -90,6 +98,7 @@ func TestJoinLeave(t *testing.T) {
 	ck := cfg.makeClient()
 
 	cfg.join(0)
+	DTESTPrintf("0 joined")
 
 	n := 10
 	ka := make([]string, n)
@@ -97,7 +106,9 @@ func TestJoinLeave(t *testing.T) {
 	for i := 0; i < n; i++ {
 		ka[i] = strconv.Itoa(i) // ensure multiple shards
 		va[i] = randstring(5)
+		DTESTPrintf("[%v]: Put (%v, %v)", i, ka[i], va[i])
 		ck.Put(ka[i], va[i])
+		DTESTPrintf("[%v]: Put (%v, %v) Succeeded", i, ka[i], va[i])
 	}
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
@@ -332,7 +343,9 @@ func TestConcurrent1(t *testing.T) {
 		ck1 := cfg.makeClient()
 		for atomic.LoadInt32(&done) == 0 {
 			x := randstring(5)
+			DTESTPrintf("[%v]: Append %v", i, x)
 			ck1.Append(ka[i], x)
+			DTESTPrintf("[%v]: Append %v done", i, x)
 			va[i] += x
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -344,36 +357,52 @@ func TestConcurrent1(t *testing.T) {
 
 	time.Sleep(150 * time.Millisecond)
 	cfg.join(1)
+	DTESTPrintf("1 joined")
 	time.Sleep(500 * time.Millisecond)
 	cfg.join(2)
+	DTESTPrintf("2 joined")
 	time.Sleep(500 * time.Millisecond)
 	cfg.leave(0)
+	DTESTPrintf("0 left")
 
 	cfg.ShutdownGroup(0)
+	DTESTPrintf("0 shut down")
 	time.Sleep(100 * time.Millisecond)
 	cfg.ShutdownGroup(1)
+	DTESTPrintf("1 shut down")
 	time.Sleep(100 * time.Millisecond)
 	cfg.ShutdownGroup(2)
+	DTESTPrintf("2 shut down")
 
 	cfg.leave(2)
+	DTESTPrintf("2 left")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.StartGroup(0)
+	DTESTPrintf("0 restarted")
 	cfg.StartGroup(1)
+	DTESTPrintf("1 restarted")
 	cfg.StartGroup(2)
+	DTESTPrintf("2 restarted")
 
 	time.Sleep(100 * time.Millisecond)
 	cfg.join(0)
+	DTESTPrintf("0 joined")
 	cfg.leave(1)
+	DTESTPrintf("1 left")
 	time.Sleep(500 * time.Millisecond)
 	cfg.join(1)
+	DTESTPrintf("1 joined")
 
 	time.Sleep(1 * time.Second)
 
 	atomic.StoreInt32(&done, 1)
+	DTESTPrintf("kill all goroutines")
 	for i := 0; i < n; i++ {
 		<-ch
 	}
+
+	DTESTPrintf("all goroutines done")
 
 	for i := 0; i < n; i++ {
 		check(t, ck, ka[i], va[i])
