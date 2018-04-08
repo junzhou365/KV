@@ -12,8 +12,6 @@ func (rf *Raft) runLeader() {
 
 	term := state.getCurrentTerm()
 
-	respCh := make(chan rpcResp)
-
 	done := make(chan interface{})
 	defer close(done)
 
@@ -23,10 +21,8 @@ func (rf *Raft) runLeader() {
 
 	for {
 		select {
-		case rf.rpcCh <- respCh:
-			if r := <-respCh; r.toFollower {
-				return
-			}
+		case <-rf.rpcCh:
+			return
 
 		case <-heartbeatTimer:
 			go rf.appendNewEntries(done, true, term)

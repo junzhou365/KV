@@ -5,12 +5,9 @@ import (
 )
 
 func (rf *Raft) runFollower() {
-	respCh := make(chan rpcResp)
-
 	for {
 		select {
-		case rf.rpcCh <- respCh:
-			<-respCh
+		case <-rf.rpcCh:
 
 		case <-time.After(getElectionTimeout()):
 			rf.state.setRole(CANDIDATE)

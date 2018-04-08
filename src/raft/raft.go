@@ -52,7 +52,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	state             RaftState
-	rpcCh             chan chan rpcResp
+	rpcCh             chan bool
 	heartbeatInterval time.Duration
 	retryInterval     time.Duration
 	commit            chan int
@@ -79,7 +79,6 @@ const (
 )
 
 func (rf *Raft) peersIndexes() <-chan int {
-
 	indexesStream := make(chan int)
 	go func() {
 		defer close(indexesStream)
@@ -96,20 +95,17 @@ func (rf *Raft) peersIndexes() <-chan int {
 }
 
 func (rf *Raft) DiscardLogEnries(index int, term int) {
-	jobDone := rf.Serialize("DiscardLogEnries")
-	defer close(jobDone)
+	rf.state.rw.Lock()
+	defer rf.state.rw.Unlock()
 
 	// Has been trimmed?
-	if rf.state.indexTrimmed(index) {
+	if rf.state.indexTrimmedWithNoLock(index) {
 		return
 	}
-	rf.state.discardLogEnries(index, term)
+	rf.state.discardLogEnriesWithNoLock(index, term)
 }
 
 func (rf *Raft) LoadBaseLogEntry(index int, term int) {
-	jobDone := rf.Serialize("LoadBaseLogEntry")
-	defer close(jobDone)
-
 	rf.state.loadBaseLogEntry(index, term)
 }
 
@@ -123,6 +119,20 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) GetStateWithNoLock() (int, bool) {
 	// Your code here (2A).
 	return rf.state.CurrentTerm, rf.state.role == LEADER
+}
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 //
@@ -151,45 +161,40 @@ type RequestVoteReply struct {
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	jobDone := rf.Serialize("RequestVote")
-	defer close(jobDone)
-
-	//defer DTPrintf("%d: disk usage: %d after request", rf.me, rf.persister.RaftStateSize())
-	//defer DTPrintf("%d: done persist]]", rf.me)
 	defer rf.state.persist(rf.persister)
-	//defer DTPrintf("%d: [[start persist", rf.me)
+
+	state := &rf.state
+	state.rw.Lock()
+	defer state.rw.Unlock()
 
 	DTPrintf("%d: get Request RPC args: %+v\n", rf.me, args)
 
-	resCh := <-rf.rpcCh
+	curTerm := state.CurrentTerm
+	curVotedFor := state.VotedFor
 
-	curTerm := rf.state.getCurrentTerm()
-	curVotedFor := rf.state.getVotedFor()
-
-	resp := rpcResp{toFollower: false}
 	// update term
 	if args.Term > curTerm {
 		curTerm = args.Term
-		rf.state.setCurrentTerm(curTerm)
-		rf.state.setRole(FOLLOWER)
 		curVotedFor = -1
-		rf.state.setVotedFor(curVotedFor)
-		resp.toFollower = true
-	}
 
-	resCh <- resp
+		state.CurrentTerm = curTerm
+		state.role = FOLLOWER
+		state.VotedFor = -1
+
+		go func() { rf.rpcCh <- true }()
+	}
 
 	isLeaderTermValid := args.Term == curTerm
 	isVotedForValid := curVotedFor == -1 || curVotedFor == args.CandidateId
 	isEntryUpToDate := false
 
 	// Is it most up-to-date?
-	logLen := rf.state.getLogLen()
+	logLen := state.getLogLenWithNoLock()
 	lastLogIndex := logLen - 1
-	lastTerm := rf.state.getLogEntryTerm(lastLogIndex)
+	lastTerm := state.getLogEntryTermWithNoLock(lastLogIndex)
 
-	DTPrintf("%d received RequestVote RPC req %+v | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
-		rf.me, args, curVotedFor, lastLogIndex, logLen)
+	//DTPrintf("%d received RequestVote RPC req %+v | votedFor: %d, lastLogIndex: %d, logLen: %d\n",
+	//rf.me, args, curVotedFor, lastLogIndex, logLen)
 	if logLen == 1 || args.LastLogTerm > lastTerm ||
 		args.LastLogTerm == lastTerm && args.LastLogIndex >= lastLogIndex {
 		isEntryUpToDate = true
@@ -198,14 +203,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if isLeaderTermValid && isVotedForValid && isEntryUpToDate {
 		reply.VoteGranted = true
 		// XXX: VotedFor is implicitly updated in args.Term > term case
-		rf.state.setVotedFor(args.CandidateId)
+		state.VotedFor = args.CandidateId
 	} else {
 		reply.VoteGranted = false
 	}
 
 	reply.Term = curTerm
 
-	DTPrintf("%d voted back to %d with reply %v\n", rf.me, args.CandidateId, reply)
+	//DTPrintf("%d voted back to %d with reply %v\n", rf.me, args.CandidateId, reply)
 }
 
 type AppendEntriesArgs struct {
@@ -225,20 +230,6 @@ type AppendEntriesReply struct {
 	ConflictTerm  int // optimization
 }
 
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a int, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	DTPrintf("%d: get Append for term %d from leader. prevIndex: %d, len of entris: %d\n",
 		rf.me, args.Term, args.PrevLogIndex, len(args.Entries))
@@ -252,38 +243,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.state.persist(rf.persister)
 	//defer DTPrintf("%d: [[start persist", rf.me)
 
-	var resCh chan rpcResp
-	resCh = <-rf.rpcCh
-
 	curTerm := rf.state.getCurrentTerm()
-	resp := rpcResp{toFollower: false}
 	switch {
 	case args.Term > curTerm:
 		curTerm = args.Term
 		rf.state.setCurrentTerm(curTerm)
 		rf.state.setRole(FOLLOWER)
-		resp.toFollower = true
 
 	case args.Term < curTerm:
 		reply.Term = curTerm
 		reply.Success = false
 		DTPrintf("%d received reset for term %d from stale leader\n", rf.me, args.Term)
 		// Did not receive RPC from *current* leader
-		resp.toFollower = false
-
-		resCh <- resp
 		return
 	}
 
 	// At this point the role could only be FOLLOWER and CANDIDATE.
 	if rf.state.getRole() == LEADER {
-		DTPrintf("Term %d Leader %d got Append RPC from another same term leader\n",
-			args.Term, rf.me)
-		panic("Wrong Leader!")
+		panic(fmt.Sprintf("%d: got Append RPC from another machine for same term %d leader\n",
+			rf.me, args.Term))
 	}
 
 	rf.state.setRole(FOLLOWER)
-	resCh <- resp
+	go func() { rf.rpcCh <- true }()
 
 	if rf.state.getRole() != FOLLOWER {
 		return
@@ -413,29 +395,21 @@ func (rf *Raft) InstallSnapshot(
 	DTPrintf("%d: received Snapshot RPC, lastIndex: %d, lastTerm: %d, args.Term: %d\n",
 		rf.me, args.LastIncludedEntryIndex, args.LastIncludedEntryTerm, args.Term)
 
-	var resCh chan rpcResp
-	resCh = <-rf.rpcCh
-
 	term := rf.state.getCurrentTerm()
 
-	resp := rpcResp{toFollower: false}
 	switch {
 	case term < args.Term:
 		rf.state.setCurrentTerm(args.Term)
 		rf.state.setRole(FOLLOWER)
-		resp.toFollower = true
-		resCh <- resp
-
 		reply.Term = args.Term
+
+		go func() { rf.rpcCh <- true }()
 		return
 
 	case term > args.Term:
 		reply.Term = term
-		resCh <- resp
 		return
 	}
-
-	resCh <- resp
 
 	// We have saved this snapshot
 	if rf.state.indexTrimmed(args.LastIncludedEntryIndex) {
@@ -609,7 +583,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.heartbeatInterval = 100 * time.Millisecond // max number test permits
 	rf.retryInterval = 20 * time.Millisecond      // max number test permits
-	rf.rpcCh = make(chan chan rpcResp)
+	rf.rpcCh = make(chan bool)
 	rf.newEntry = make(chan int)
 
 	rf.commit = make(chan int)

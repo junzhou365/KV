@@ -35,18 +35,12 @@ func (rf *Raft) runCandidate() {
 	defer close(done)
 
 	electionResCh := rf.elect(done, args)
-
-	respCh := make(chan rpcResp)
 	votes := 1
 
 	for {
 		select {
-		case rf.rpcCh <- respCh:
-			r := <-respCh
-			if r.toFollower {
-				state.setRole(FOLLOWER)
-				return
-			}
+		case <-rf.rpcCh:
+			return
 
 		case reply := <-electionResCh:
 			switch {
