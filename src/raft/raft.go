@@ -58,9 +58,9 @@ type Raft struct {
 	commit            chan int
 	applyCh           chan ApplyMsg
 	newEntry          chan int
-	//sendChs           []chan sendJob
-	appendReplyCh chan bool
-	shutDown      chan interface{}
+	appendReplyCh     chan bool
+
+	shutDown chan interface{}
 }
 
 type rpcResp struct {
@@ -77,6 +77,23 @@ const (
 	CANDIDATE
 	LEADER
 )
+
+func (rf *Raft) peersIndexes() <-chan int {
+
+	indexesStream := make(chan int)
+	go func() {
+		defer close(indexesStream)
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+
+			indexesStream <- i
+		}
+	}()
+
+	return indexesStream
+}
 
 func (rf *Raft) DiscardLogEnries(index int, term int) {
 	jobDone := rf.Serialize("DiscardLogEnries")
@@ -532,6 +549,7 @@ func (rf *Raft) StartWithFunc(command interface{}, f func(int, int)) (int, int, 
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+	DTPrintf("Shut Down\n")
 	close(rf.shutDown)
 }
 

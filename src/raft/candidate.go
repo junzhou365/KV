@@ -7,58 +7,65 @@ import (
 
 func (rf *Raft) runCandidate() {
 	if rf.state.getRole() != CANDIDATE {
-		DTPrintf("%d: Wrong rf role %d\n", rf.me, rf.state.role)
 		log.Fatal("In runCandidate, Wrong Raft Role. Dead!!!")
 	}
+
+	var term int
+	var args *RequestVoteArgs
+	state := &rf.state // Make sure it's pointer
+
+	state.rw.Lock() // Lock
+
+	state.CurrentTerm++
+	state.VotedFor = rf.me
+	term = state.CurrentTerm
+
+	args = &RequestVoteArgs{
+		Term:         term,
+		CandidateId:  rf.me,
+		LastLogIndex: state.getLogLenWithNoLock() - 1,
+		LastLogTerm: state.getLogEntryTermWithNoLock(
+			state.getLogLenWithNoLock() - 1)}
+
+	state.rw.Unlock() // Unlock
+
+	DTPrintf("%d collects votes for term %d\n", rf.me, term)
 
 	done := make(chan interface{})
 	defer close(done)
 
-	term := rf.state.getCurrentTerm()
-	term++
-	rf.state.setCurrentTerm(term)
-	rf.state.setVotedFor(rf.me)
-
-	electionResCh := rf.elect(done, term)
-
-	electionTimeoutTimer := time.After(getElectionTimeout())
-	DTPrintf("%d collects votes for term %d\n", rf.me, term)
+	electionResCh := rf.elect(done, args)
 
 	respCh := make(chan rpcResp)
 	votes := 1
-
-	becomeLeader := false
-	becomeFollower := false
-
-LOOP:
 
 	for {
 		select {
 		case rf.rpcCh <- respCh:
 			r := <-respCh
 			if r.toFollower {
-				becomeFollower = true
-				break LOOP
+				state.setRole(FOLLOWER)
+				return
 			}
 
 		case reply := <-electionResCh:
-			DTPrintf("%d got requestVote with reply %+v from %d for term %d\n",
-				rf.me, reply, reply.index, reply.Term)
 			switch {
 			case reply.Term > term:
-				becomeFollower = true
-				break LOOP
+				state.setRole(FOLLOWER)
+				return
+
 			case reply.VoteGranted:
 				votes++
 			}
 
 			if votes > len(rf.peers)/2 {
-				becomeLeader = true
-				break LOOP
+				state.setRole(LEADER)
+				DTPrintf("======= %d become a LEADER for term %d\n", rf.me, term)
+				return
 			}
 
-		case <-electionTimeoutTimer:
-			// restart election
+		case <-time.After(getElectionTimeout()):
+			DTPrintf("Restart election\n")
 			return
 
 		case <-rf.shutDown:
@@ -66,52 +73,32 @@ LOOP:
 		}
 	}
 
-	switch {
-	case becomeLeader:
-		rf.state.setRole(LEADER)
-		DTPrintf("======= %d become a LEADER for term %d, log len: %d\n",
-			rf.me, term, rf.state.getLogLen())
-
-	case becomeFollower:
-		rf.state.setRole(FOLLOWER)
-	}
-
 }
 
-func (rf *Raft) elect(done <-chan interface{}, term int) chan RequestVoteReply {
-	DTPrintf("<<<< Triggered, node: %d >>>>\n", rf.me)
-
-	args := new(RequestVoteArgs)
-	args.Term = term
-	args.CandidateId = rf.me
-	args.LastLogIndex = rf.state.getLogLen() - 1
-	args.LastLogTerm = rf.state.getLogEntryTerm(args.LastLogIndex)
-
+func (rf *Raft) elect(done <-chan interface{}, args *RequestVoteArgs) chan RequestVoteReply {
 	replyCh := make(chan RequestVoteReply)
+	send := func(i int) {
+		reply := RequestVoteReply{index: i}
+		for ok := false; !ok; {
+			select {
+			case <-done:
+				return
+			default:
+			}
 
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
+			ok = rf.sendRequestVote(i, args, &reply)
 		}
 
-		go func(i int) {
-			DTPrintf("%d send requestVote to %d for term %d\n", rf.me, i, term)
-			reply := RequestVoteReply{index: i}
-			for ok := false; !ok; {
-				select {
-				case <-done:
-					return
-				default:
-				}
-				ok = rf.sendRequestVote(i, args, &reply)
-			}
-
-			select {
-			case replyCh <- reply:
-			case <-done:
-			}
-		}(i)
+		select {
+		case replyCh <- reply:
+		case <-done:
+		}
 	}
+
+	for i := range rf.peersIndexes() {
+		go send(i)
+	}
+
 	return replyCh
 }
 

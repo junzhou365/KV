@@ -27,6 +27,7 @@ type RaftState struct {
 
 	queue chan StateRequest
 }
+
 type RaftLogEntry struct {
 	Term    int
 	Command interface{}
@@ -395,13 +396,14 @@ func (rs *RaftState) setMatchIndexWithNoLock(i int, m int) {
 
 func (rs *RaftState) initializeMatchAndNext() {
 	rs.rw.Lock()
+	defer rs.rw.Unlock()
+
 	logLen := rs.getLogLenWithNoLock()
 	rs.nextIndexes = make([]int, rs.numPeers)
 	for i := 0; i < rs.numPeers; i++ {
 		rs.nextIndexes[i] = logLen
 	}
 	rs.matchIndexes = make([]int, rs.numPeers)
-	rs.rw.Unlock()
 }
 
 // return -1 if not found
