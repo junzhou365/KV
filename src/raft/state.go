@@ -93,10 +93,14 @@ func (rs *RaftState) indexTrimmed(index int) bool {
 	return rs.indexTrimmedWithNoLock(index)
 }
 
+func (rs *RaftState) baseIndexTrimmedWithNoLock(index int) bool {
+	return rs.indexTrimmedWithNoLock(index) && index != rs.logBase
+}
+
 func (rs *RaftState) baseIndexTrimmed(index int) bool {
 	rs.rw.RLock()
 	defer rs.rw.RUnlock()
-	return rs.indexTrimmedWithNoLock(index) && index != rs.logBase
+	return rs.baseIndexTrimmedWithNoLock(index)
 }
 
 func (rs *RaftState) getLogEntryWithNoLock(index int) RaftLogEntry {
@@ -406,11 +410,15 @@ func (rs *RaftState) initializeMatchAndNext() {
 	rs.matchIndexes = make([]int, rs.numPeers)
 }
 
-// return -1 if not found
 func (rs *RaftState) updateCommitIndex(term int) int {
 	rs.rw.Lock()
 	defer rs.rw.Unlock()
 
+	return rs.updateCommitIndexWithNoLock(term)
+}
+
+// return -1 if not found
+func (rs *RaftState) updateCommitIndexWithNoLock(term int) int {
 	logLen := rs.getLogLenWithNoLock()
 	//DTPrintf("%d: the commitIndex in updateCommitIndex is %d\n", rs.me, rs.commitIndex)
 
@@ -447,6 +455,8 @@ func (rs *RaftState) appliedEntries() []ApplyMsg {
 
 		DTPrintf("%d: updated lastApplied to %d, log base: %d, log len: %d\n",
 			rs.me, rs.lastApplied, rs.logBase, rs.getLogLenWithNoLock())
+
+		DTPrintf("%d: logs are: %v\n", rs.me, rs.Log)
 
 		entry := rs.getLogEntryWithNoLock(rs.lastApplied)
 

@@ -65,7 +65,7 @@ func (rf *Raft) runCandidate() {
 			}
 
 		case <-time.After(getElectionTimeout()):
-			DTPrintf("Restart election\n")
+			DTPrintf("%d: Restart election\n", rf.me)
 			return
 
 		case <-rf.shutDown:

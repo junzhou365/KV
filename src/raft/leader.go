@@ -1,45 +1,43 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"time"
 )
 
 func (rf *Raft) runLeader() {
-	rf.state.initializeMatchAndNext()
-	term := rf.state.getCurrentTerm()
+	state := &rf.state
+	state.initializeMatchAndNext()
 
-	heartbeatTimer := time.After(0)
-	last_seen_index := 0
+	term := state.getCurrentTerm()
 
 	respCh := make(chan rpcResp)
 
-	// cannot use defer close(done) here because the "done" will be bound to a
-	// future closed channel
 	done := make(chan interface{})
 	defer close(done)
 
-	rf.appendReplyCh = make(chan bool)
+	rf.exitLeaderCh = make(chan int)
+	// send heartbeat immediately
+	heartbeatTimer := time.After(0)
 
 	for {
 		select {
 		case rf.rpcCh <- respCh:
 			if r := <-respCh; r.toFollower {
-				DTPrintf("%d: exit leader loop\n", rf.me)
 				return
 			}
 
 		case <-heartbeatTimer:
+			go rf.appendNewEntries(done, true, term)
 			heartbeatTimer = time.After(rf.heartbeatInterval)
-			rf.appendNewEntries(done, true, term, -1)
 
-		case index := <-rf.newEntry:
-			if index > last_seen_index {
-				rf.appendNewEntries(done, false, term, index)
-				last_seen_index = index
-			}
+		case <-rf.newEntry:
+			go rf.appendNewEntries(done, false, term)
 
-		case <-rf.appendReplyCh:
+		case term := <-rf.exitLeaderCh:
+			rf.state.setCurrentTerm(term)
+			rf.state.setRole(FOLLOWER)
 			DTPrintf("%d: exit leader loop\n", rf.me)
 			return
 
@@ -50,64 +48,47 @@ func (rf *Raft) runLeader() {
 }
 
 func (rf *Raft) appendNewEntries(
-	done <-chan interface{}, heartbeat bool, term int, lastNewIndex int) {
-
+	done <-chan interface{}, heartbeat bool, term int) {
 	// save before a change
 	rf.state.persist(rf.persister)
 
-	//if lastNewIndex == -1 {
-	//lastNewIndex = rf.state.getLogLen() - 1
-	//}
-
-	DTPrintf("%d: starts sending Append RPCs heartbeat: %t.\n", rf.me, heartbeat)
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
-		}
-
-		firstNewIndex := rf.state.getNextIndex(i)
-		//if !heartbeat && firstNewIndex > lastNewIndex {
-		//DTPrintf("%d: follower %d's firstNewIndex %d than the new index\n", rf.me, i, firstNewIndex)
-		//continue
-		//}
-
-		go rf.sendAppend(done, i, heartbeat, term, firstNewIndex, lastNewIndex)
+	for i := range rf.peersIndexes() {
+		go rf.sendAppend(done, i, heartbeat, term)
 	}
 }
 
-func (rf *Raft) sendAppend(done <-chan interface{}, i int, heartbeat bool, term int,
-	firstNewIndex int, lastNewIndex int) {
+func (rf *Raft) sendAppend(
+	done <-chan interface{}, i int, heartbeat bool, term int) {
 
-	defer DTPrintf("%d: finished sending Append to %d with first: %d, lastNewIndex: %d\n",
-		rf.me, i, firstNewIndex, lastNewIndex)
-	DTPrintf("%d: starts sending Append to %d with first: %d, lastNewIndex: %d\n",
-		rf.me, i, firstNewIndex, lastNewIndex)
+	//defer DTPrintf("%d: finished sending Append to %d with first: %d, lastNewIndex: %d\n",
+	//rf.me, i, firstNewIndex, lastNewIndex)
+	//DTPrintf("%d: starts sending Append to %d with first: %d, lastNewIndex: %d\n",
+	//rf.me, i, firstNewIndex, lastNewIndex)
+	first := rf.state.getNextIndex(i)
+	last := rf.state.getLogLen() - 1
 
-	first := firstNewIndex
-	last := lastNewIndex
+	if !heartbeat && last < first {
+		return
+	}
 
 LOOP:
 	for {
-		// If unable to send AppendRPC due to [first:some index] are gone, send
-		// Snapshot instead.
+		// If unable to send AppendRPC due to log[first:some index] are
+		// trimmed, send Snapshot instead.
 		// heartbeat also needs this because prev = first - 1 is needed.
 		if rf.state.indexTrimmed(first) {
 			first = rf.sendSnapshot(done, i, term, first)
-			DTPrintf("%d: After sending snapshot, the first: %d\n", rf.me, first)
+			//DTPrintf("%d: After sending snapshot, the first: %d\n", rf.me, first)
 		}
 
-		if first < 0 || (!heartbeat && first > last) {
-			DTPrintf("%d: follower %d's first %d than last %d\n", rf.me, i, first, last)
-			return
-		}
-
-		args := rf.getAppendArgs(first, last, term, heartbeat)
+		args := rf.getAppendArgs(first, term, heartbeat)
 		if args == nil {
 			continue
 		}
 
 		reply := new(AppendEntriesReply)
-		DTPrintf("%d: sends Append to %d with next: %d, last: %d\n", rf.me, i, first, last)
+		DTPrintf("%d: sends Append to %d with next: %d\n",
+			rf.me, i, first)
 
 		ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 
@@ -123,13 +104,13 @@ LOOP:
 			continue LOOP
 		}
 
-		shouldReturn := false
-		shouldReturn, first, last =
-			rf.processAppendReply(done, reply, heartbeat, i, args)
+		first = rf.processAppendReply(reply, heartbeat, i, args)
 
-		//DTPrintf("%d: [UNLOCK] for %d finish processing Append reply\n", rf.me, i)
-		if shouldReturn {
+		switch {
+		case first <= 0:
 			return
+		default:
+			heartbeat = false
 		}
 	}
 }
@@ -170,33 +151,30 @@ LOOP:
 }
 
 // first: first new entry
-// last: last new entry
-func (rf *Raft) getAppendArgs(first int, last int, term int,
-	heartbeat bool) (args *AppendEntriesArgs) {
+func (rf *Raft) getAppendArgs(first int, term int, heartbeat bool) (
+	args *AppendEntriesArgs) {
 
-	jobDone := rf.Serialize("getAppendArgs")
-	defer close(jobDone)
+	state := &rf.state
+	state.rw.RLock()
+	defer state.rw.RUnlock()
 
-	//DTPrintf("%d: try to get prev Term for %d\n", rf.me, first-1)
-	if rf.state.baseIndexTrimmed(first - 1) {
+	if state.baseIndexTrimmedWithNoLock(first - 1) {
 		DTPrintf("%d: [WARNING] snapshot was taken again. first %d\n", rf.me, first)
 		return nil
 	}
-	prevTerm := rf.state.getLogEntryTerm(first - 1)
 
 	args = &AppendEntriesArgs{
 		Term:         term,
 		PrevLogIndex: first - 1,
-		PrevLogTerm:  prevTerm,
-		LeaderCommit: rf.state.getCommitIndex()}
+		PrevLogTerm:  state.getLogEntryTermWithNoLock(first - 1),
+		LeaderCommit: state.getCommitIndexWithNoLock()}
 
 	if !heartbeat {
-		//DTPrintf("%d: try to get log range with first: %d, last: %d\n",
-		//rf.me, first, last)
-		newEntries, ok := rf.state.getLogRange(first, last+1)
+		end := state.getLogLenWithNoLock()
+		newEntries, ok := state.getLogRangeWithNoLock(first, end)
 		if !ok {
-			DTPrintf("%d: [WARNING] snapshot was taken again. first %d\n", rf.me, first)
-			return nil
+			panic(fmt.Sprintf("%d: logs lost. first: %d, end: %d\n",
+				rf.me, first, end))
 		}
 		args.Entries = append(args.Entries, newEntries...)
 	}
@@ -204,55 +182,51 @@ func (rf *Raft) getAppendArgs(first int, last int, term int,
 	return args
 }
 
-func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntriesReply,
-	heartbeat bool, i int, args *AppendEntriesArgs) (
-	shouldReturn bool, first int, last int) {
+// return values:
+// 0: normal return
+// -1: found new term
+// positive: inconsistent log index. Could be conflicted or short follower's log
+func (rf *Raft) processAppendReply(reply *AppendEntriesReply,
+	heartbeat bool, i int, args *AppendEntriesArgs) (divgIndex int) {
 
-	defer DTPrintf("%d: process the AppendReply done %+v, heartbeat: %t\n",
-		rf.me, reply, heartbeat)
+	//defer DTPrintf("%d: process the AppendReply done %+v, heartbeat: %t\n",
+	//rf.me, reply, heartbeat)
 
-	jobDone := rf.Serialize("processAppendReply")
-	defer close(jobDone)
+	state := &rf.state
+	state.rw.Lock()
+	defer state.rw.Unlock()
 
-	DTPrintf("%d: process the AppendReply %+v, heartbeat: %t\n", rf.me, reply, heartbeat)
+	//DTPrintf("%d: process the AppendReply %+v, heartbeat: %t\n",
+	//rf.me, reply, heartbeat)
 
-	shouldReturn = false
-	origFirst := args.PrevLogIndex + 1
-	origLast := args.PrevLogIndex + len(args.Entries)
-	first, last = origFirst, origLast
+	divgIndex = 0
 
 	switch {
 
 	case !reply.Success && reply.Term > args.Term:
-		rf.state.setCurrentTerm(reply.Term)
-		rf.state.setRole(FOLLOWER)
-
-		select {
-		case rf.appendReplyCh <- true:
-		case <-done:
-		}
+		DTPrintf("%d: Append discovered higher term: %d\n",
+			rf.me, reply.Term)
+		go func() { rf.exitLeaderCh <- reply.Term }()
+		return -1
 
 	case !reply.Success && heartbeat:
-		shouldReturn = true
-		first = reply.ConflictIndex
-		last = rf.state.getLogLen() - 1
-		DTPrintf("%d: heartbeat discovered %d's conflict entries. first: %d, last: %d\n",
-			rf.me, i, first, last)
-		go rf.sendAppend(done, i, false, args.Term, first, last)
+		divgIndex = reply.ConflictIndex
+		DTPrintf("%d: heartbeat discovered %d's conflict entries start at: %d\n",
+			rf.me, i, divgIndex)
 
 	case !reply.Success && reply.ConflictTerm == -1:
 		// Follower doesn't have the entry with that term. len of
 		// follower's log is shorter than the leader's.
-		first = reply.ConflictIndex
+		divgIndex = reply.ConflictIndex
 
 	case !reply.Success && reply.ConflictTerm != -1:
 		// Find the last entry of the conflicting term. The conflicting
 		// server will delete all entries after this new start
-		j := last
+		j := state.getLogLenWithNoLock() - 1
 		// Notice here we don't use baseIndexTrimmed
 		found := false
-		for ; !rf.state.indexTrimmed(j); j-- {
-			entryTerm := rf.state.getLogEntryTerm(j)
+		for ; !state.indexTrimmedWithNoLock(j); j-- {
+			entryTerm := state.getLogEntryTermWithNoLock(j)
 			if entryTerm == reply.ConflictTerm {
 				found = true
 				break
@@ -260,44 +234,49 @@ func (rf *Raft) processAppendReply(done <-chan interface{}, reply *AppendEntries
 		}
 
 		if !found {
-			first = reply.ConflictIndex
+			divgIndex = reply.ConflictIndex
 		} else {
-			first = j + 1
+			divgIndex = j + 1
 		}
-		DTPrintf("%d: conflict term %d. new index: %d\n", rf.me, reply.ConflictTerm, first)
+		DTPrintf("%d: conflict term %d. index: %d\n",
+			rf.me, reply.ConflictTerm, divgIndex)
 
 	case reply.Success && heartbeat:
-		last = rf.state.getLogLen() - 1
-		first = rf.state.getNextIndex(i)
+		last := state.getLogLenWithNoLock() - 1
+		first := state.getNextIndexWithNoLock(i)
 		if last >= first {
 			DTPrintf("%d: heartbeat discovered %d's new log entries\n", rf.me, i)
-			go rf.sendAppend(done, i, false, args.Term, first, last)
+			divgIndex = first
 		}
-		shouldReturn = true
 
 	case reply.Success:
-		iMatch := args.PrevLogIndex + len(args.Entries)
-		if iMatch > rf.state.getMatchIndex(i) {
-			rf.state.setMatchIndex(i, iMatch)
-			DTPrintf("%d: update %d's match %d\n", rf.me, i, iMatch)
+		match := args.PrevLogIndex + len(args.Entries)
+		if match > state.getMatchIndexWithNoLock(i) {
+			state.setMatchIndexWithNoLock(i, match)
 		}
 
-		iNext := last + 1
-		rf.state.setNextIndex(i, iNext)
+		next := match + 1
+		last := state.getLogLenWithNoLock() - 1
 
-		commitIndex := rf.state.updateCommitIndex(args.Term)
+		state.setNextIndexWithNoLock(i, next)
+
+		if last >= next {
+			DTPrintf("%d: heartbeat discovered %d's new log entries at %d\n",
+				rf.me, i, next)
+			divgIndex = next
+		}
+
+		commitIndex := state.updateCommitIndexWithNoLock(args.Term)
 		if commitIndex != -1 {
-			rf.commit <- commitIndex
+			go func() { rf.commit <- commitIndex }()
 		}
-
-		shouldReturn = true
 
 	default:
-		DTPrintf("!!! reply: %v, term: %d\n", reply, args.Term)
-		log.Fatal("!!! Incorrect Append RPC reply")
+		log.Fatal("!!! Incorrect Append RPC reply: %v for term %d",
+			reply, args.Term)
 	}
 
-	return shouldReturn, first, last
+	return divgIndex
 }
 
 // return
@@ -313,13 +292,9 @@ func (rf *Raft) processSnapshotReply(done <-chan interface{}, reply *InstallSnap
 
 	switch {
 	case reply.Term > args.Term:
+		go func() { rf.exitLeaderCh <- reply.Term }()
 		rf.state.setCurrentTerm(reply.Term)
 		rf.state.setRole(FOLLOWER)
-
-		select {
-		case rf.appendReplyCh <- true:
-		case <-done:
-		}
 
 	default:
 		// succeeded, it means follower has the same state at least up to lastIncludedEntryIndex.

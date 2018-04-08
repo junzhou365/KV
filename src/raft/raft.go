@@ -58,7 +58,7 @@ type Raft struct {
 	commit            chan int
 	applyCh           chan ApplyMsg
 	newEntry          chan int
-	appendReplyCh     chan bool
+	exitLeaderCh      chan int
 
 	shutDown chan interface{}
 }
